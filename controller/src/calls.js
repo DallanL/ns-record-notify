@@ -49,9 +49,11 @@ export class CallRegistry {
       this.ari.getChannelVar(channel.id, 'NS_DEST'),
     ]);
 
+    // Extension is for the operator UI only -- every call routed here is in
+    // scope, so it plays no part in the decision.
     const extension = extractExtension({ pai, from, callerNumber: channel.caller?.number });
     const dialed = dest || channel.dialplan?.exten || null;
-    const decision = this.rules.evaluate({ extension, dialed });
+    const decision = this.rules.evaluate({ dialed });
 
     const call = {
       channelId: channel.id,

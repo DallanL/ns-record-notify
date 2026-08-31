@@ -4,6 +4,10 @@ Injects a repeating "this call is being recorded" announcement into **outbound**
 calls placed through a hosted NetSapiens PBX. Both parties hear it, it repeats on
 a configurable interval, and an operator can stop it from a web UI at any time.
 
+**Every call routed through this box is announced.** Selection happens upstream:
+point the NetSapiens dial rule at this host for the calls that need the
+announcement, and route everything else straight to the carrier as it goes today.
+
 ## Why it works this way
 
 The NetSapiens API cannot inject audio. The v2 create-call endpoint exposes only
@@ -46,7 +50,7 @@ cp .env.example .env    # fill in your IPs, hosts and ARI password
 ```
 
 Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law —
-see `asterisk/sounds/README.md`), and set who gets announced in
+see `asterisk/sounds/README.md`), and set the interval and prompt in
 `config/rules.yaml`.
 
 ```sh
@@ -55,8 +59,9 @@ docker compose up -d --build
 
 The operator UI is on `http://127.0.0.1:8080` by default.
 
-Finally, point the NetSapiens outbound trunk/dial rule at this host, and add a
-failover route straight to the carrier (see *Failure modes* below).
+Finally, point the NetSapiens outbound dial rule at this host **for the calls you
+want announced**, and add a failover route straight to the carrier (see *Failure
+modes* below).
 
 ### Docker vs bare metal
 
@@ -69,8 +74,8 @@ lets ARI stay bound to `127.0.0.1`, where it is not reachable off-box.
 
 ## Configuration
 
-`config/rules.yaml` controls everything about targeting and playback. It ships
-with `matching.enabled: false` — leave it that way until step 1 of *Verifying*
+`config/rules.yaml` controls the prompt and the interval. It ships with
+`announcement.enabled: false` — leave it that way until step 1 of *Verifying*
 below passes.
 
 Reload it without dropping calls:
@@ -79,13 +84,16 @@ Reload it without dropping calls:
 curl -X POST http://127.0.0.1:8080/api/reload
 ```
 
-Targeting keys off the originating extension, read from `P-Asserted-Identity`
-(falling back to `From`, then caller ID). Whether NetSapiens sends the extension
-or the company DID in that header is platform-dependent — confirm it against a
-real INVITE before relying on per-user rules.
+There is no per-user or per-destination targeting: routing decides what gets
+announced. The only exceptions are the `safety.exclude_dialed` list and, more
+importantly, the emergency numbers (911, 112, 999, …) blocked in `rules.js` **in
+code**, not just in config. Neither can be announced over, even by a manual
+operator start.
 
-Emergency numbers (911, 112, 999, …) are blocked in `rules.js` in code, not just
-in config, and cannot be announced over even by a manual operator start.
+The operator UI shows the originating extension, read from `P-Asserted-Identity`
+(falling back to `From`, then caller ID). This is display only — if NetSapiens
+sends the company DID rather than the extension there, the column is less useful
+but nothing about the announcement behaviour changes.
 
 ## Failure modes
 
@@ -100,12 +108,12 @@ straight to the carrier.
 
 ## Verifying
 
-1. **Transparency first.** With `matching.enabled: false`, route outbound through
-   the box and confirm two-way audio, correct caller ID, ringback, DTMF into an
-   IVR, and correct answer times in the NetSapiens CDRs. Get this clean before
-   enabling anything.
-2. **Injection.** Enable a rule for one test extension; confirm both parties hear
-   the prompt and that it repeats at the configured interval.
+1. **Transparency first.** With `announcement.enabled: false`, route outbound
+   through the box and confirm two-way audio, correct caller ID, ringback, DTMF
+   into an IVR, and correct answer times in the NetSapiens CDRs. Get this clean
+   before enabling anything.
+2. **Injection.** Set `enabled: true` and place a test call; confirm both parties
+   hear the prompt and that it repeats at the configured interval.
 3. **Stop.** Hit stop mid-playback — audio must cut immediately and not resume.
 4. **911 guard.** Confirm an excluded destination never announces.
 5. **Degradation.** `docker compose stop controller`, then place an outbound
@@ -119,8 +127,8 @@ straight to the carrier.
 cd controller && npm install && npm test
 ```
 
-`test/unit.test.mjs` covers rule matching, the emergency guard, and the announcer
-state machine. `test/e2e.test.mjs` boots the real controller against a fake ARI
+`test/unit.test.mjs` covers the announce decision, the emergency guard, and the
+announcer state machine. `test/e2e.test.mjs` boots the real controller against a fake ARI
 server and drives a call through classify → answer → announce → stop → hangup.
 
 Neither test needs Asterisk. The behaviour that *does* need real Asterisk — that

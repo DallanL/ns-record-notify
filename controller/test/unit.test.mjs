@@ -13,21 +13,18 @@ console.log('extractExtension ok');
 // ---- Rules ----
 const r = new Rules(new URL('../../config/rules.yaml', import.meta.url).pathname);
 // shipped default is disabled
-assert.equal(r.evaluate({ extension: '1001', dialed: '5551212' }).announce, false);
+assert.equal(r.evaluate({ dialed: '5551212' }).announce, false);
 r.config.enabled = true;
-assert.equal(r.evaluate({ extension: '1001', dialed: '5551212' }).announce, true, 'exact ext match');
-assert.equal(r.evaluate({ extension: '2044', dialed: '5551212' }).announce, true, 'glob 20?? match');
-assert.equal(r.evaluate({ extension: '20444', dialed: '5551212' }).announce, false, 'glob must not over-match');
-assert.equal(r.evaluate({ extension: '3001', dialed: '5551212' }).announce, false, 'out of scope ext');
-// emergency must never announce, even when the extension matches
-for (const d of ['911', '1911', '+1911', '112', '933']) {
-  const v = r.evaluate({ extension: '1001', dialed: d });
-  assert.equal(v.announce, false, `emergency ${d} must not announce`);
+// every routed call is in scope regardless of who placed it or what was dialed
+assert.equal(r.evaluate({ dialed: '5551212' }).announce, true);
+assert.equal(r.evaluate({ dialed: '+15551212' }).announce, true);
+assert.equal(r.evaluate({ dialed: null }).announce, true, 'unknown destination still announces');
+// emergency must never announce
+for (const d of ['911', '1911', '+1911', '112', '933', '999', '000']) {
+  assert.equal(r.evaluate({ dialed: d }).announce, false, `emergency ${d} must not announce`);
+  assert.equal(r.isBlockedDestination(d), true, `${d} must be blocked for manual start too`);
 }
-assert.equal(r.isBlockedDestination('911'), true);
 assert.equal(r.isBlockedDestination('5551212'), false);
-// regex metacharacters in a dialed number must not blow up matching
-assert.equal(r.evaluate({ extension: '1001', dialed: '+15551212' }).announce, true);
 console.log('rules ok');
 
 // ---- Announcer state machine against a fake ARI ----

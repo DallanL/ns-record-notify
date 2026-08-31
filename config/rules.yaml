@@ -1,39 +1,37 @@
-# Which outbound calls get the announcement, and how it plays.
+# Every call routed through this system gets the announcement. Selection happens
+# upstream at the NetSapiens dial rule: calls that should not be announced are
+# simply not routed through this box.
 #
 # Reload without restarting: POST /api/reload  (or send SIGHUP to the controller).
 
 announcement:
+  # Master switch. Leave false until step 1 of the verification plan passes --
+  # that step confirms calls pass through cleanly before any audio is injected.
+  enabled: false
+
   # Media to play. `sound:` paths resolve under Asterisk's sounds directories;
   # files in asterisk/sounds/ land in custom/.
   media: sound:custom/recording-notice
+
   # Seconds between the START of one playback and the start of the next.
   # If the prompt is longer than this, the next play is skipped rather than
   # overlapping itself.
   interval_seconds: 30
+
   # Wait this long after the call is answered before the first playback, so the
   # announcement does not collide with the callee's "hello".
   initial_delay_seconds: 3
+
   # Safety valve: stop announcing after this long even if nobody hits stop.
   # Set to 0 to keep going until the call ends or an operator stops it.
   max_duration_seconds: 0
 
-matching:
-  # Master switch. Leave false until step 1 of the verification plan passes.
-  enabled: false
-
-  # Announce calls placed BY these extensions. Read from P-Asserted-Identity,
-  # falling back to the From header and then the caller ID number.
-  # Supports exact values and `*` / `?` globs.
-  extensions:
-    - "1001"
-    - "20??"
-
-  # Optional: further restrict to certain dialed numbers. Empty = any destination.
-  dialed:
-    []
-
-  # Never announce on these destinations, regardless of everything above.
-  # Emergency numbers are hardcoded in addition to this list -- see rules.js.
+safety:
+  # Destinations that must never be announced over, even though everything
+  # routed here is otherwise in scope. Standard emergency numbers are enforced
+  # in code as well (see rules.js) -- this list is for site-specific additions
+  # such as an internal safety or security line.
+  # Supports `*` and `?` globs.
   exclude_dialed:
     - "911"
     - "1911"
