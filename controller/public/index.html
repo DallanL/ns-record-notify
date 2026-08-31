@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call Announcements</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --fg: #16181d; --muted: #6b7280;
+    --card: #ffffff; --line: #e3e6ea;
+    --on: #067647; --on-bg: #e7f6ee;
+    --off: #6b7280; --off-bg: #eef0f2;
+    --stop: #b42318; --stop-bg: #fde8e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e8eaed; --muted: #9aa2ad;
+      --card: #1c1f25; --line: #2c3138;
+      --on: #4ade80; --on-bg: #10281c;
+      --off: #9aa2ad; --off-bg: #23272e;
+      --stop: #fca5a5; --stop-bg: #2c1618;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 18px; margin: 0; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .bar { margin-left: auto; display: flex; gap: 8px; }
+  button {
+    font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  }
+  button:hover { border-color: var(--muted); }
+  button.danger { background: var(--stop-bg); border-color: transparent; color: var(--stop); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; min-width: 720px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .tag.playing { background: var(--on-bg); color: var(--on); }
+  .tag.waiting { background: var(--on-bg); color: var(--on); }
+  .tag.idle { background: var(--off-bg); color: var(--off); }
+  .reason { color: var(--muted); font-size: 12px; white-space: normal; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  .err { background: var(--stop-bg); color: var(--stop); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Call Announcements</h1>
+  <span class="meta" id="meta">loading…</span>
+  <div class="bar">
+    <button id="refresh">Refresh</button>
+    <button id="reload">Reload rules</button>
+    <button id="stopAll" class="danger">Stop all</button>
+  </div>
+</header>
+
+<div id="error" class="err" hidden></div>
+
+<div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Extension</th><th>Dialed</th><th>State</th>
+        <th>Announcement</th><th>Plays</th><th>Why</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty" hidden>No active outbound calls.</div>
+</div>
+
+<script>
+const rows = document.getElementById('rows');
+const empty = document.getElementById('empty');
+const meta = document.getElementById('meta');
+const errBox = document.getElementById('error');
+
+function showError(message) {
+  errBox.hidden = !message;
+  errBox.textContent = message || '';
+}
+
+async function api(path, method = 'GET') {
+  const res = await fetch(path, { method });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+function cell(text, className) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function render(data) {
+  const { calls, config } = data;
+  meta.textContent = `${calls.length} active · auto-announce ${config.enabled ? 'on' : 'off'} · every ${config.intervalSeconds}s`;
+
+  rows.replaceChildren();
+  empty.hidden = calls.length > 0;
+
+  for (const call of calls) {
+    const tr = document.createElement('tr');
+    tr.append(
+      cell(call.extension || '—'),
+      cell(call.dialed || '—'),
+      cell(call.answered ? 'answered' : 'ringing'),
+    );
+
+    const state = document.createElement('td');
+    const tag = document.createElement('span');
+    tag.className = `tag ${call.announcement}`;
+    tag.textContent = call.announcement;
+    state.append(tag);
+    tr.append(state, cell(String(call.plays)), cell(call.reason, 'reason'));
+
+    const actions = document.createElement('td');
+    const running = call.announcement !== 'idle';
+    const btn = document.createElement('button');
+    btn.textContent = running ? 'Stop' : 'Start';
+    if (running) btn.className = 'danger';
+    btn.disabled = !running && !call.answered;
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        showError('');
+        await api(`/api/calls/${encodeURIComponent(call.channelId)}/announce/${running ? 'stop' : 'start'}`, 'POST');
+        await refresh();
+      } catch (e) {
+        showError(e.message);
+        btn.disabled = false;
+      }
+    };
+    actions.append(btn);
+    tr.append(actions);
+    rows.append(tr);
+  }
+}
+
+async function refresh() {
+  try {
+    render(await api('/api/calls'));
+    showError('');
+  } catch (e) {
+    showError(`Cannot reach controller: ${e.message}`);
+  }
+}
+
+document.getElementById('refresh').onclick = refresh;
+document.getElementById('reload').onclick = async () => {
+  try { await api('/api/reload', 'POST'); await refresh(); }
+  catch (e) { showError(e.message); }
+};
+document.getElementById('stopAll').onclick = async () => {
+  try { await api('/api/announce/stop-all', 'POST'); await refresh(); }
+  catch (e) { showError(e.message); }
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

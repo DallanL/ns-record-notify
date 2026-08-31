@@ -1,0 +1,21 @@
+{
+  "name": "ns-record-notify-controller",
+  "version": "1.0.0",
+  "description": "Injects a recurring announcement into outbound NetSapiens calls via Asterisk ARI",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/unit.test.mjs && node test/e2e.test.mjs",
+    "test:unit": "node test/unit.test.mjs",
+    "test:e2e": "node test/e2e.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0",
+    "yaml": "^2.5.1"
+  }
+}

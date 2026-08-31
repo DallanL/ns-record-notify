@@ -1,0 +1,136 @@
+# ns-record-notify
+
+Injects a repeating "this call is being recorded" announcement into **outbound**
+calls placed through a hosted NetSapiens PBX. Both parties hear it, it repeats on
+a configurable interval, and an operator can stop it from a web UI at any time.
+
+## Why it works this way
+
+The NetSapiens API cannot inject audio. The v2 create-call endpoint exposes only
+`call-orig-user` / `call-term-user` / `auto-answer-enabled` / caller-ID
+parameters — there is no barge, whisper, or "play media into call X" operation.
+Event subscriptions are observation-only, and native barge is a carrier-gated
+supervisor feature code.
+
+So this sits in the outbound media path instead:
+
+```
+phones ──> NetSapiens ──SIP──> [this box] ──SIP──> carrier ──> PSTN
+                                    │
+                                    ├── native Dial() bridge
+                                    ├── ARI snoop channel (whisper=both)
+                                    └── controller: rules, timer, stop button
+```
+
+Inbound routing is untouched — NetSapiens keeps delivering inbound calls exactly
+as it does today.
+
+**The call itself is a plain dialplan `Dial()`.** Audio is injected through an ARI
+snoop channel created with `spy=none&whisper=both`, which transmits into both
+directions of the monitored channel and attaches as an audiohook rather than
+re-bridging the call. That combination is the whole design: early media (ringback,
+SIT/intercept tones), DTMF, and NetSapiens' CDR answer-times all behave exactly as
+they do without this box in the path. Anchoring the media in an ARI mixing bridge
+instead would have forced answering the leg early — corrupting CDRs and billing
+every unanswered call as connected — or dropping carrier early media.
+
+The announcement repeats as **play-once-then-wait**, not a looped file. A looped
+file talks over the whole conversation and cannot be cut cleanly mid-loop; a
+discrete playback has a `playbackId` that can be deleted the instant an operator
+hits stop.
+
+## Setup
+
+```sh
+cp .env.example .env    # fill in your IPs, hosts and ARI password
+```
+
+Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law —
+see `asterisk/sounds/README.md`), and set who gets announced in
+`config/rules.yaml`.
+
+```sh
+docker compose up -d --build
+```
+
+The operator UI is on `http://127.0.0.1:8080` by default.
+
+Finally, point the NetSapiens outbound trunk/dial rule at this host, and add a
+failover route straight to the carrier (see *Failure modes* below).
+
+### Docker vs bare metal
+
+Docker is fine — **both containers use `network_mode: host`**, which is
+deliberate. Virtualization is not the latency risk here; Docker's *bridge*
+networking is. A 10k-port RTP range through the userland proxy and NAT adds
+jitter and breaks SDP address rewriting. With host networking this performs
+essentially like bare metal, so bare metal is not required. Host networking also
+lets ARI stay bound to `127.0.0.1`, where it is not reachable off-box.
+
+## Configuration
+
+`config/rules.yaml` controls everything about targeting and playback. It ships
+with `matching.enabled: false` — leave it that way until step 1 of *Verifying*
+below passes.
+
+Reload it without dropping calls:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/reload
+```
+
+Targeting keys off the originating extension, read from `P-Asserted-Identity`
+(falling back to `From`, then caller ID). Whether NetSapiens sends the extension
+or the company DID in that header is platform-dependent — confirm it against a
+real INVITE before relying on per-user rules.
+
+Emergency numbers (911, 112, 999, …) are blocked in `rules.js` in code, not just
+in config, and cannot be announced over even by a manual operator start.
+
+## Failure modes
+
+The dialplan is `Stasis(announcer)` followed by `Dial()`. If the **controller** is
+down, `Stasis()` sets `STASISSTATUS=FAILED` and execution falls through to the
+next priority — the `Dial()`. Outbound calling keeps working, just without
+announcements.
+
+The **Asterisk** container is a hard dependency for outbound calls while the trunk
+points at it, so configure a failover route on the NetSapiens dial rule that goes
+straight to the carrier.
+
+## Verifying
+
+1. **Transparency first.** With `matching.enabled: false`, route outbound through
+   the box and confirm two-way audio, correct caller ID, ringback, DTMF into an
+   IVR, and correct answer times in the NetSapiens CDRs. Get this clean before
+   enabling anything.
+2. **Injection.** Enable a rule for one test extension; confirm both parties hear
+   the prompt and that it repeats at the configured interval.
+3. **Stop.** Hit stop mid-playback — audio must cut immediately and not resume.
+4. **911 guard.** Confirm an excluded destination never announces.
+5. **Degradation.** `docker compose stop controller`, then place an outbound
+   call. It must still complete, without announcements.
+6. **Teardown.** Hang up from each side; `asterisk -rx "core show channels"`
+   should show no leftover `Snoop/` channels.
+
+## Tests
+
+```sh
+cd controller && npm install && npm test
+```
+
+`test/unit.test.mjs` covers rule matching, the emergency guard, and the announcer
+state machine. `test/e2e.test.mjs` boots the real controller against a fake ARI
+server and drives a call through classify → answer → announce → stop → hangup.
+
+Neither test needs Asterisk. The behaviour that *does* need real Asterisk — that
+`whisper=both` injects audio and that snoop channels do not accumulate — was
+verified against Asterisk 20.6 during development; see the note in `announcer.js`
+about snoop lifetime.
+
+## Known Asterisk behaviour worth knowing
+
+`DELETE /channels/{snoopId}` returns 204 but does **not** tear down a snoop
+channel while the spied channel is still up — Asterisk reaps it with the call.
+Creating a snoop per start/stop cycle therefore leaks idle `Snoop/` channels on a
+long call, so `Announcer` creates at most one per call and reuses it.
