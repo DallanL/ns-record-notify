@@ -32,12 +32,27 @@ TTS engine locally:
 docker run --rm -v "$PWD/asterisk/sounds:/out" -e UID=$(id -u) -e GID=$(id -g) \
   debian:bookworm-slim bash -c '
     apt-get update -qq && apt-get install -y -qq espeak-ng
-    espeak-ng -v en-us -s 145 -p 45 -w /out/.tts-raw.wav "This call is being recorded."
+    espeak-ng -v en-us -s 145 -a 200 -w /out/.tts-raw.wav "This call is being recorded."
     chown ${UID}:${GID} /out/.tts-raw.wav'
 
-ffmpeg -y -i asterisk/sounds/.tts-raw.wav -ar 8000 -ac 1 -acodec pcm_s16le \
-  asterisk/sounds/recording-notice.wav && rm asterisk/sounds/.tts-raw.wav
+# sox only -- resample and peak-normalise. Do NOT put ffmpeg's loudnorm or
+# silenceremove filters in this chain: they reduced the prompt to -41 dBFS peak,
+# which plays "successfully" and is completely inaudible on the call.
+sox asterisk/sounds/.tts-raw.wav -r 8000 -c 1 -b 16 -e signed-integer \
+    asterisk/sounds/recording-notice.wav norm -3
+rm asterisk/sounds/.tts-raw.wav
 ```
+
+## ALWAYS check the level before using it
+
+```sh
+sox asterisk/sounds/recording-notice.wav -n stat 2>&1 | grep -E "Maximum|RMS"
+```
+
+Expect roughly **peak 0.5-0.9, RMS 0.05-0.2**. Anything with an RMS in the
+thousandths is silence as far as a caller is concerned, and nothing downstream
+will tell you: Asterisk reports the playback as successful, the controller counts
+it as a play, and the call sounds completely normal.
 
 ## Checking Asterisk can play it
 

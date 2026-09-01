@@ -142,6 +142,16 @@ docker compose logs asterisk | grep "Playback failed"
 
 The usual cause is the media path above.
 
+If playback reports success and callers still hear nothing, **measure the prompt
+itself** — a file can be technically valid, play "successfully", and still be
+inaudible:
+
+```sh
+sox asterisk/sounds/recording-notice.wav -n stat 2>&1 | grep -E "Maximum|RMS"
+```
+
+Expect peak 0.5-0.9 and RMS 0.05-0.2. An RMS in the thousandths is silence.
+
 ### Diagnosing no-audio
 
 ```sh
