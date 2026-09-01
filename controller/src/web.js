@@ -46,10 +46,24 @@ export function createServer({ registry, rules }) {
 }
 
 export function listen(app, port, host) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = app.listen(port, host, () => {
       log.info('operator UI listening', { host, port });
       resolve(server);
+    });
+    // Without this, a port clash surfaces as an unhandled 'error' event and the
+    // container crash-loops with a stack trace. Host networking makes clashes
+    // likely, so say plainly what to do about it.
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        log.error(
+          `port ${port} on ${host} is already in use by another process -- ` +
+          'set WEB_PORT in .env to a free port and restart the controller',
+        );
+      } else {
+        log.error('operator UI failed to start', { host, port, message: err.message });
+      }
+      reject(err);
     });
   });
 }

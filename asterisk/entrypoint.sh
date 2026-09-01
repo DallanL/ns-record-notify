@@ -16,6 +16,14 @@ set -euo pipefail
 # shell assignment would substitute an empty string and silently produce, for
 # example, `bindport = ` in http.conf.
 export LOCAL_NET="${LOCAL_NET:-10.0.0.0/8}"
+
+# Per-trunk media/signalling addressing. Defaults keep the single-path
+# behaviour; set the *_BIND_IP pair to different interfaces when the two trunks
+# leave the box by different routes.
+NS_BIND_IP="${NS_BIND_IP:-0.0.0.0}"
+CARRIER_BIND_IP="${CARRIER_BIND_IP:-0.0.0.0}"
+NS_EXTERNAL_IP="${NS_EXTERNAL_IP:-$EXTERNAL_IP}"
+CARRIER_EXTERNAL_IP="${CARRIER_EXTERNAL_IP:-$EXTERNAL_IP}"
 export NS_SIP_PORT="${NS_SIP_PORT:-5060}"
 export CARRIER_SIP_PORT="${CARRIER_SIP_PORT:-5060}"
 export ARI_PORT="${ARI_PORT:-8088}"
@@ -23,13 +31,64 @@ export EXTERNAL_IP NS_SIP_HOST CARRIER_SIP_HOST ARI_USER ARI_PASS
 CARRIER_USER="${CARRIER_USER:-}"
 CARRIER_PASS="${CARRIER_PASS:-}"
 
+ENVSUBST_VARS='${EXTERNAL_IP} ${LOCAL_NET} ${NS_SIP_HOST} ${NS_SIP_PORT} ${CARRIER_SIP_HOST} ${CARRIER_SIP_PORT} ${ARI_USER} ${ARI_PASS} ${ARI_PORT} ${NS_TRANSPORT} ${CARRIER_TRANSPORT}'
+
 render() {
     # Substitute ONLY the named variables, never anything else in the file.
-    envsubst '${EXTERNAL_IP} ${LOCAL_NET} ${NS_SIP_HOST} ${NS_SIP_PORT} ${CARRIER_SIP_HOST} ${CARRIER_SIP_PORT} ${ARI_USER} ${ARI_PASS} ${ARI_PORT}' \
-        < "/etc/asterisk/templates/$1" > "/etc/asterisk/$1"
+    envsubst "$ENVSUBST_VARS" < "/etc/asterisk/templates/$1" > "/etc/asterisk/$1"
 }
 
-render pjsip.conf
+# pjsip.conf already holds the generated transports, so append rather than clobber.
+render_append() {
+    envsubst "$ENVSUBST_VARS" < "/etc/asterisk/templates/$1" >> "/etc/asterisk/$1"
+}
+
+# Emit the SIP transports before the rest of pjsip.conf.
+#
+# external_media_address is a PER-TRANSPORT setting, so a box whose two trunks
+# leave by different interfaces (say NetSapiens over a WireGuard tunnel and the
+# carrier over the local WAN) must have one transport per path. Advertising a
+# single address to both makes one leg tell the far end to send media to an
+# address our RTP does not come from, and symmetric/strict RTP then drops it --
+# the call connects and nobody hears anything.
+emit_transport() {
+    local name="$1" bind="$2" extip="$3"
+    cat >> /etc/asterisk/pjsip.conf <<TRANSPORT
+[${name}]
+type = transport
+protocol = udp
+bind = ${bind}:5060
+external_media_address = ${extip}
+external_signaling_address = ${extip}
+local_net = ${LOCAL_NET}
+
+TRANSPORT
+}
+
+emit_transports() {
+    : > /etc/asterisk/pjsip.conf
+    if [ "$NS_BIND_IP" = "$CARRIER_BIND_IP" ]; then
+        if [ "$NS_EXTERNAL_IP" != "$CARRIER_EXTERNAL_IP" ]; then
+            echo "entrypoint: FATAL - NS_EXTERNAL_IP and CARRIER_EXTERNAL_IP differ but both" >&2
+            echo "entrypoint: trunks bind ${NS_BIND_IP}. Give each trunk its own *_BIND_IP." >&2
+            exit 1
+        fi
+        # One path: emit a single transport and point BOTH endpoints at it.
+        # Two transports cannot share a bind address -- the second fails with
+        # "Address already in use" and its endpoint is left with no transport.
+        emit_transport transport-ns "$NS_BIND_IP" "$NS_EXTERNAL_IP"
+        export NS_TRANSPORT=transport-ns CARRIER_TRANSPORT=transport-ns
+        echo "entrypoint: single SIP transport on ${NS_BIND_IP}, advertising ${NS_EXTERNAL_IP}"
+    else
+        emit_transport transport-ns "$NS_BIND_IP" "$NS_EXTERNAL_IP"
+        emit_transport transport-carrier "$CARRIER_BIND_IP" "$CARRIER_EXTERNAL_IP"
+        export NS_TRANSPORT=transport-ns CARRIER_TRANSPORT=transport-carrier
+        echo "entrypoint: split transports -- NetSapiens ${NS_BIND_IP} advertising ${NS_EXTERNAL_IP}, carrier ${CARRIER_BIND_IP} advertising ${CARRIER_EXTERNAL_IP}"
+    fi
+}
+
+emit_transports
+render_append pjsip.conf
 render ari.conf
 render http.conf
 

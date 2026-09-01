@@ -72,8 +72,64 @@ send from an IP listed in `NS_SIP_HOST`.
 most carrier trunks are IP-authenticated; use `CARRIER_USER`/`CARRIER_PASS` only
 if yours requires registration.
 
-Calls arrive on UDP 5060 and RTP lands in 10000-20000/udp, so open those to the
-NetSapiens and carrier IPs.
+Calls arrive on UDP 5060 and RTP lands in 10000-20000/udp, so open **both** to
+the NetSapiens and carrier IPs. Forwarding 5060 but not the RTP range gives a
+call that connects with no audio.
+
+### Media addressing
+
+One rule decides whether you get audio:
+
+> For each trunk, `EXTERNAL_IP` must be the address the far end sends media to,
+> **and** the address your RTP actually leaves from.
+
+Signalling can work fine while this is wrong — the call connects, both sides
+answer, and nobody hears anything, because each side is sending RTP to an
+address the other never transmits from.
+
+Check the second half of that rule with:
+
+```sh
+ip route get <your carrier IP>
+ip route get <your NetSapiens IP>
+```
+
+If both name the same interface and source IP, you are on one path: set
+`EXTERNAL_IP` to that path's public address and you are done.
+
+If they name **different** interfaces — a VPN or WireGuard tunnel for one trunk
+and the local WAN for the other is the usual cause — one advertised address
+cannot be right for both, because `external_media_address` is a per-transport
+setting in PJSIP. Either route both trunks down the same interface (simplest), or
+give each its own transport:
+
+```sh
+NS_BIND_IP=10.0.0.2          # tunnel interface
+NS_EXTERNAL_IP=10.0.0.2
+CARRIER_BIND_IP=10.0.0.3    # WAN interface
+CARRIER_EXTERNAL_IP=203.0.113.10
+```
+
+The entrypoint reports which mode it chose at startup:
+
+```
+entrypoint: single SIP transport on 0.0.0.0, advertising 203.0.113.10
+entrypoint: split transports -- NetSapiens 10.0.0.2 advertising 10.0.0.2, carrier ...
+```
+
+Setting `NS_EXTERNAL_IP` and `CARRIER_EXTERNAL_IP` differently while both trunks
+share a bind address is refused at startup, since two transports cannot bind the
+same address and port.
+
+### Diagnosing no-audio
+
+```sh
+docker exec ns-announce-asterisk asterisk -rx "pjsip set logger on"
+docker exec ns-announce-asterisk asterisk -rx "rtp set debug on"
+```
+
+Place a call, then read `docker compose logs asterisk`. Compare the `c=` line in
+the SDP you send against the address your RTP is actually sourced from.
 
 ### Multiple NetSapiens servers
 

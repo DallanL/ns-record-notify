@@ -22,7 +22,15 @@ const registry = new CallRegistry({ ari, rules });
 registry.attach();
 ari.connect();
 
-const server = await listen(createServer({ registry, rules }), webPort, webHost);
+let server;
+try {
+  server = await listen(createServer({ registry, rules }), webPort, webHost);
+} catch {
+  // listen() has already logged what is wrong and how to fix it; a stack trace
+  // on top of that only obscures it.
+  ari.close();
+  process.exit(1);
+}
 
 process.on('SIGHUP', () => {
   log.info('SIGHUP received, reloading rules');
