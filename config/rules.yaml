@@ -7,7 +7,7 @@
 announcement:
   # Master switch. Leave false until step 1 of the verification plan passes --
   # that step confirms calls pass through cleanly before any audio is injected.
-  enabled: false
+  enabled: true
 
   # Media to play. `sound:` paths resolve under Asterisk's sounds directories;
   # files in asterisk/sounds/ land in custom/.

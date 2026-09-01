@@ -22,9 +22,26 @@ Keep it short — under about 5 seconds. It plays over a live conversation on th
 interval set in `config/rules.yaml`, so a long prompt is disproportionately
 disruptive and will start colliding with its own next playback.
 
-To generate a placeholder for testing:
+## Generating a placeholder
+
+The file currently here is synthetic speech, fine for testing but robotic — replace
+it with a real recording before going live. To regenerate it without installing a
+TTS engine locally:
 
 ```sh
-espeak-ng -w recording-notice.wav "This call is being recorded."
-ffmpeg -i recording-notice.wav -ar 8000 -ac 1 -acodec pcm_s16le out.wav && mv out.wav recording-notice.wav
+docker run --rm -v "$PWD/asterisk/sounds:/out" -e UID=$(id -u) -e GID=$(id -g) \
+  debian:bookworm-slim bash -c '
+    apt-get update -qq && apt-get install -y -qq espeak-ng
+    espeak-ng -v en-us -s 145 -p 45 -w /out/.tts-raw.wav "This call is being recorded."
+    chown ${UID}:${GID} /out/.tts-raw.wav'
+
+ffmpeg -y -i asterisk/sounds/.tts-raw.wav -ar 8000 -ac 1 -acodec pcm_s16le \
+  asterisk/sounds/recording-notice.wav && rm asterisk/sounds/.tts-raw.wav
 ```
+
+## Checking Asterisk can play it
+
+The directory is bind-mounted read-only, so a new file is picked up with no
+rebuild and no restart. To confirm Asterisk can actually find and decode it,
+play it to a throwaway bridge and look for `PlaybackStarted` / `PlaybackFinished`
+rather than waiting on a test call.
