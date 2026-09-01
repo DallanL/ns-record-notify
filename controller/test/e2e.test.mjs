@@ -76,7 +76,42 @@ s = await api('/api/calls');
 assert.equal(s.calls.length, 0, 'registry must be empty after hangup');
 console.log('teardown ok');
 
-// 5. emergency destination must never auto-announce
+// 5. DTMF stop, driven the way Asterisk drives it
+fake.emit({ type: 'StasisStart', application: 'announcer', args: ['classify'],
+  channel: { id: 'ch-2', name: 'PJSIP/netsapiens-0009', caller: { number: '1001' }, dialplan: { exten: 'outbound' } } });
+await sleep(300);
+fake.emit({ type: 'ChannelStateChange', channel: { id: 'ch-2', state: 'Up', name: 'PJSIP/netsapiens-0009' } });
+await sleep(400);
+assert.notEqual((await api('/api/calls')).calls[0].announcement, 'idle', 'ch-2 should be announcing');
+
+// The outbound leg enters the bridge FIRST, before ours -- the ordering that
+// previously left the peer unmapped.
+fake.emit({ type: 'ChannelEnteredBridge', bridge: { id: 'br-1', channels: ['peer-2'] },
+  channel: { id: 'peer-2', name: 'PJSIP/carrier-0010' } });
+fake.emit({ type: 'ChannelEnteredBridge', bridge: { id: 'br-1', channels: ['peer-2', 'ch-2'] },
+  channel: { id: 'ch-2', name: 'PJSIP/netsapiens-0009' } });
+await sleep(200);
+
+// A partial sequence must not stop it.
+fake.emit({ type: 'ChannelDtmfReceived', digit: '*', channel: { id: 'peer-2', name: 'PJSIP/carrier-0010' } });
+await sleep(200);
+assert.notEqual((await api('/api/calls')).calls[0].announcement, 'idle', 'partial sequence must not stop');
+
+// An unrelated digit in between must not break the match either.
+fake.emit({ type: 'ChannelDtmfReceived', digit: '9', channel: { id: 'peer-2', name: 'PJSIP/carrier-0010' } });
+await sleep(300);
+let d = (await api('/api/calls')).calls[0];
+assert.equal(d.announcement, 'idle', 'completing the sequence must stop the announcement');
+assert.match(d.reason, /DTMF/, 'reason should record the DTMF stop');
+assert.equal(d.autoAnnounce, false, 'DTMF stop must not restart on the next interval');
+const playsAtDtmfStop = d.plays;
+await sleep(1500);
+assert.equal((await api('/api/calls')).calls[0].plays, playsAtDtmfStop, 'no plays after DTMF stop');
+console.log('dtmf stop ok:', d.reason);
+fake.emit({ type: 'ChannelDestroyed', channel: { id: 'ch-2' } });
+await sleep(200);
+
+// 6. emergency destination must never auto-announce
 fake.emit({ type: 'StasisStart', application: 'announcer', args: ['classify'],
   channel: { id: 'ch-911', name: 'PJSIP/netsapiens-0002', caller: { number: '1001' }, dialplan: { exten: 'outbound' } } });
 await sleep(300);

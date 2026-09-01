@@ -105,7 +105,10 @@ function cell(text, className) {
 
 function render(data) {
   const { calls, config } = data;
-  meta.textContent = `${calls.length} active · auto-announce ${config.enabled ? 'on' : 'off'} · every ${config.intervalSeconds}s`;
+  const stopCode = config.dtmfDigits
+    ? `${config.dtmfDigits} stops (${config.dtmfAcceptFrom})`
+    : 'DTMF stop off';
+  meta.textContent = `${calls.length} active · auto-announce ${config.enabled ? 'on' : 'off'} · every ${config.intervalSeconds}s · ${stopCode}`;
 
   rows.replaceChildren();
   empty.hidden = calls.length > 0;

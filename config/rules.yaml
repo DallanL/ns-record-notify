@@ -26,6 +26,26 @@ announcement:
   # Set to 0 to keep going until the call ends or an operator stops it.
   max_duration_seconds: 0
 
+dtmf_stop:
+  # Digits someone on the call can press to stop the announcement for the rest
+  # of that call. Leave empty ("") to disable the feature entirely.
+  #
+  # Use two digits rather than one. Whatever you choose still travels to the far
+  # end -- this box observes DTMF, it cannot swallow it -- so a lone "*" or "0"
+  # risks being pressed at a far-end IVR and silently killing the announcement.
+  digits: "*9"
+
+  # Who is allowed to press it:
+  #   caller - the internal NetSapiens-side user only
+  #   callee - the far party only
+  #   any    - either side (default)
+  # Consider "caller" if the announcement is a compliance notice you do not want
+  # the outside party able to switch off.
+  accept_from: any
+
+  # A partial sequence is forgotten after this many seconds of no digits.
+  sequence_timeout_seconds: 5
+
 safety:
   # Destinations that must never be announced over, even though everything
   # routed here is otherwise in scope. Standard emergency numbers are enforced

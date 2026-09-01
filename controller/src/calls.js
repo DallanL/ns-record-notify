@@ -1,5 +1,6 @@
 import { Announcer } from './announcer.js';
 import { extractExtension } from './rules.js';
+import { DigitMatcher } from './dtmf.js';
 import { log } from './log.js';
 
 /**
@@ -27,6 +28,8 @@ export class CallRegistry {
     this.ari.on('ChannelStateChange', (e) => this.#onStateChange(e).catch(this.#logFailure('ChannelStateChange')));
     this.ari.on('ChannelDestroyed', (e) => this.#onDestroyed(e).catch(this.#logFailure('ChannelDestroyed')));
     this.ari.on('PlaybackFinished', (e) => this.#onPlaybackFinished(e));
+    this.ari.on('ChannelEnteredBridge', (e) => this.#onEnteredBridge(e));
+    this.ari.on('ChannelDtmfReceived', (e) => this.#onDtmf(e).catch(this.#logFailure('ChannelDtmfReceived')));
     this.ari.on('connected', () => this.#reconcile().catch(this.#logFailure('reconcile')));
   }
 
@@ -66,6 +69,14 @@ export class CallRegistry {
       answeredAt: null,
       autoAnnounce: decision.announce,
       reason: decision.reason,
+      // Set once the dialplan Dial() bridges the two legs, so DTMF from the far
+      // party can be attributed back to this call.
+      bridgeId: null,
+      peerChannelId: null,
+      digits: new DigitMatcher(
+        this.rules.config.dtmfDigits,
+        this.rules.config.dtmfTimeoutSeconds * 1000,
+      ),
       announcer: new Announcer({
         ari: this.ari,
         channelId: channel.id,
@@ -108,6 +119,79 @@ export class CallRegistry {
     this.calls.delete(id);
     await call.announcer.dispose();
     log.info('call ended', { channelId: id, durationSeconds: Math.round((Date.now() - call.startedAt) / 1000) });
+  }
+
+  /**
+   * Track bridge membership so the outbound leg can be identified. Dial()
+   * creates the bridge, so this is the only place the peer channel is learnt.
+   */
+  #onEnteredBridge(event) {
+    const bridgeId = event.bridge?.id;
+    const channelId = event.channel?.id;
+    if (!bridgeId || !channelId) return;
+
+    const own = this.calls.get(channelId);
+    if (own) {
+      own.bridgeId = bridgeId;
+      // The outbound leg usually enters the bridge FIRST, before we have a
+      // bridgeId to match it against, so pick it up from the membership list
+      // rather than relying on event order.
+      const peer = (event.bridge.channels ?? []).find((id) => id !== channelId);
+      if (peer && own.peerChannelId === null) {
+        own.peerChannelId = peer;
+        log.debug('peer leg identified', { channelId, peer });
+      }
+      return;
+    }
+
+    // Late-joining leg, for the opposite ordering.
+    for (const call of this.calls.values()) {
+      if (call.bridgeId === bridgeId && call.peerChannelId === null) {
+        call.peerChannelId = channelId;
+        log.debug('peer leg identified', { channelId: call.channelId, peer: channelId });
+        return;
+      }
+    }
+  }
+
+  /**
+   * A digit pressed on either leg can stop the announcement.
+   *
+   * This only works while a snoop channel is attached: in a native RTP bridge
+   * Asterisk passes DTMF straight through without surfacing it, and it is the
+   * announcement's own audiohook that causes the frames to be processed. That is
+   * sufficient, since there is nothing to stop before the first announcement,
+   * and the snoop persists for the rest of the call once created.
+   */
+  async #onDtmf(event) {
+    const channelId = event.channel?.id;
+    const digit = event.digit;
+    if (!channelId || !digit) return;
+
+    let call = this.calls.get(channelId);
+    let side = 'caller';
+    if (!call) {
+      call = [...this.calls.values()].find((c) => c.peerChannelId === channelId);
+      side = 'callee';
+    }
+    if (!call || !call.digits.enabled) return;
+
+    const allowed = this.rules.config.dtmfAcceptFrom;
+    if (allowed !== 'any' && allowed !== side) {
+      log.debug('ignoring DTMF from disallowed side', { channelId: call.channelId, side, allowed });
+      return;
+    }
+
+    if (!call.digits.press(digit)) return;
+
+    log.info('announcement stopped by DTMF', {
+      channelId: call.channelId,
+      side,
+      digits: this.rules.config.dtmfDigits,
+    });
+    call.autoAnnounce = false;
+    call.reason = `stopped by ${side} via DTMF`;
+    await call.announcer.stop();
   }
 
   #onPlaybackFinished(event) {

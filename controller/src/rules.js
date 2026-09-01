@@ -28,6 +28,7 @@ export class Rules {
     const raw = parse(readFileSync(this.path, 'utf8')) ?? {};
     const announcement = raw.announcement ?? {};
     const safety = raw.safety ?? {};
+    const dtmf = raw.dtmf_stop ?? {};
 
     this.config = {
       media: announcement.media ?? 'sound:custom/recording-notice',
@@ -35,6 +36,11 @@ export class Rules {
       initialDelaySeconds: Number(announcement.initial_delay_seconds ?? 3),
       maxDurationSeconds: Number(announcement.max_duration_seconds ?? 0),
       enabled: announcement.enabled === true,
+      dtmfDigits: String(dtmf.digits ?? ''),
+      dtmfAcceptFrom: ['caller', 'callee', 'any'].includes(dtmf.accept_from)
+        ? dtmf.accept_from
+        : 'any',
+      dtmfTimeoutSeconds: Number(dtmf.sequence_timeout_seconds ?? 5),
     };
 
     this.excludeDialed = (safety.exclude_dialed ?? []).map(globToRegExp);
@@ -44,6 +50,8 @@ export class Rules {
       enabled: this.config.enabled,
       exclusions: this.excludeDialed.length,
       intervalSeconds: this.config.intervalSeconds,
+      dtmfStop: this.config.dtmfDigits || '(disabled)',
+      dtmfAcceptFrom: this.config.dtmfAcceptFrom,
     });
     return this.config;
   }

@@ -26,6 +26,8 @@ export function createServer({ registry, rules }) {
       enabled: rules.config.enabled,
       intervalSeconds: rules.config.intervalSeconds,
       media: rules.config.media,
+      dtmfDigits: rules.config.dtmfDigits,
+      dtmfAcceptFrom: rules.config.dtmfAcceptFrom,
     },
   })));
 

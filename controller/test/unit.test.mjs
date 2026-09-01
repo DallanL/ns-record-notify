@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import { Rules, extractExtension } from '../src/rules.js';
 import { Announcer } from '../src/announcer.js';
+import { DigitMatcher } from '../src/dtmf.js';
 
 // ---- extractExtension ----
 assert.equal(extractExtension({ pai: '"Jo" <sip:1001@pbx.example.com>' }), '1001');
@@ -26,6 +27,30 @@ for (const d of ['911', '1911', '+1911', '112', '933', '999', '000']) {
 }
 assert.equal(r.isBlockedDestination('5551212'), false);
 console.log('rules ok');
+
+// ---- DTMF matcher ----
+const m = new DigitMatcher('*9', 5000);
+assert.equal(m.enabled, true);
+assert.equal(m.press('*', 1000), false, 'partial sequence must not fire');
+assert.equal(m.press('9', 1500), true, 'completing the sequence fires');
+assert.equal(m.press('9', 2000), false, 'buffer must clear after a match');
+// a wrong leading digit must not block a later correct sequence
+assert.equal(m.press('1', 2500), false);
+assert.equal(m.press('*', 3000), false);
+assert.equal(m.press('9', 3500), true, 'tail matching works after stray digits');
+// inter-digit timeout resets a partial sequence
+assert.equal(m.press('*', 10000), false);
+assert.equal(m.press('9', 20000), false, 'digit after the timeout must not complete');
+// unrelated digits never fire
+for (const d of ['1', '2', '#', '0']) assert.equal(m.press(d, 30000), false);
+// single-digit sequences work
+const single = new DigitMatcher('5', 5000);
+assert.equal(single.press('5', 0), true);
+// empty sequence disables the feature
+const off = new DigitMatcher('', 5000);
+assert.equal(off.enabled, false);
+assert.equal(off.press('*', 0), false, 'disabled matcher never fires');
+console.log('dtmf matcher ok');
 
 // ---- Announcer state machine against a fake ARI ----
 const calls = [];

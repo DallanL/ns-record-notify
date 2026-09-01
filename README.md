@@ -169,9 +169,38 @@ Stop is per call and permanent for that call — it clears the auto-announce fla
 so it will not restart on the next interval. **Start** on the same row resumes it
 if needed.
 
-Note this is an *operator* control, not a caller one: whoever stops it needs the
-web UI or the API, not the phone. If you want the person on the call to stop it
-themselves with a DTMF digit, that is a small addition — say the word.
+### From the phone, with DTMF
+
+Someone on the call can stop it themselves by pressing a code — `*9` by default,
+set in `config/rules.yaml`:
+
+```yaml
+dtmf_stop:
+  digits: "*9"       # "" disables the feature
+  accept_from: any   # caller | callee | any
+  sequence_timeout_seconds: 5
+```
+
+It behaves exactly like the UI's Stop: audio cuts immediately and stays off for
+the rest of that call. The UI shows the active code in its header and records
+`stopped by caller via DTMF` (or `callee`) as the reason.
+
+Three things worth knowing:
+
+- **Use two digits, not one.** This box *observes* DTMF, it cannot swallow it, so
+  whatever you choose still travels to the far end. A lone `*` or `0` risks being
+  pressed at a far-end IVR and silently killing the announcement. A partial
+  sequence is forgotten after `sequence_timeout_seconds`.
+- **`accept_from` decides who may press it.** The default `any` matches the usual
+  request, but if the announcement is a compliance notice you do not want the
+  outside party switching off, set `caller` — the internal NetSapiens-side user
+  only. Verified: with `caller`, digits from the far party are ignored and the
+  announcement keeps playing.
+- **It only works while an announcement is or has been running on that call.** In
+  a native RTP bridge Asterisk passes DTMF straight through without surfacing it;
+  it is the announcement's own audiohook that causes the digits to be seen. That
+  is not a limitation in practice — there is nothing to stop before the first
+  announcement, and the hook stays for the rest of the call once created.
 
 The UI binds to `127.0.0.1` by default. To reach it from another machine, set
 `WEB_HOST=0.0.0.0` and put a reverse proxy with authentication in front of it;
