@@ -43,11 +43,101 @@ file talks over the whole conversation and cannot be cut cleanly mid-loop; a
 discrete playback has a `playbackId` that can be deleted the instant an operator
 hits stop.
 
-## Setup
+## Configuring the trunks
+
+Everything trunk-related lives in `.env`; the Asterisk configs are templates
+rendered from it at container start.
 
 ```sh
-cp .env.example .env    # fill in your IPs, hosts and ARI password
+cp .env.example .env
 ```
+
+| Variable | What it is |
+| --- | --- |
+| `EXTERNAL_IP` | This host's IP **as NetSapiens and your carrier see it**. Goes into SDP; wrong value = one-way audio. |
+| `LOCAL_NET` | Your local subnet, so Asterisk knows what is not external. |
+| `NS_SIP_HOST` | The NetSapiens core(s) that will send calls here — see *Multiple NetSapiens servers* below. |
+| `CARRIER_SIP_HOST` / `CARRIER_SIP_PORT` | Where calls go next. Also accepts a list. |
+| `CARRIER_USER` / `CARRIER_PASS` | Leave **blank** for an IP-authenticated trunk. If set, the entrypoint adds digest auth and an outbound registration. |
+| `ARI_PASS` | Change it. ARI binds to loopback, but still. |
+
+Then, on the two systems either side:
+
+**NetSapiens** — add this host as an outbound SIP trunk / connection, and point
+the dial rule for the calls you want announced at it. Add a second, lower-priority
+route straight to your carrier as failover (see *Failure modes*). NetSapiens must
+send from an IP listed in `NS_SIP_HOST`.
+
+**Carrier** — authorise this host's IP on your trunk. That is usually all, since
+most carrier trunks are IP-authenticated; use `CARRIER_USER`/`CARRIER_PASS` only
+if yours requires registration.
+
+Calls arrive on UDP 5060 and RTP lands in 10000-20000/udp, so open those to the
+NetSapiens and carrier IPs.
+
+### Multiple NetSapiens servers
+
+`NS_SIP_HOST` takes a comma-separated list, and each entry may be an IP, a CIDR,
+or a hostname:
+
+```sh
+NS_SIP_HOST=10.20.30.41,10.20.30.42,10.20.30.43
+NS_SIP_HOST=10.20.30.0/24          # or cover the whole range
+```
+
+Every core that can send you traffic must be covered, or its INVITEs are rejected
+as unidentified. The entrypoint emits **one identify object per host** and says so
+at startup:
+
+```
+entrypoint: netsapiens will be identified by 3 host(s)
+```
+
+That split is deliberate. Asterisk resolves hostnames once at config load, and a
+single unresolvable entry makes the *whole* identify object fail to load — with
+one combined match, one bad hostname takes every other core down with it and
+rejects all inbound calls. Per host, a bad entry costs only that host.
+
+**Use IPs or a CIDR, not hostnames.** A CIDR covers cores added later with no
+config change at all, and it sidesteps DNS entirely. Hostnames do work, but they
+are resolved once at load time, so after a DNS change you would need
+`docker exec ns-announce-asterisk asterisk -rx "pjsip reload"`.
+
+Check what actually loaded with:
+
+```sh
+docker exec ns-announce-asterisk asterisk -rx "pjsip show identifies"
+```
+
+## SIP header passthrough
+
+**Asterisk is a B2BUA and relays no headers by default.** This was measured, not
+assumed: with a stock config, `Identity`, `P-Asserted-Identity`, `Diversion`,
+`Remote-Party-ID` and custom `X-` headers all arrived at the carrier **empty**,
+with only the calling number surviving in a rebuilt `From`.
+
+That would have stripped the STIR/SHAKEN `Identity` header off every outbound
+call, so `[from-ns]` captures these headers and the `[carrier-headers]` pre-dial
+handler re-adds them to the outbound INVITE. Verified end to end between two
+Asterisk instances:
+
+| Header | Result |
+| --- | --- |
+| `Identity` (STIR/SHAKEN) | Relayed **byte-identical** — required, or the signature no longer verifies |
+| `P-Asserted-Identity` | Relayed verbatim |
+| `Remote-Party-ID` | Relayed verbatim |
+| `P-Charge-Info`, `P-Preferred-Identity` | Relayed verbatim |
+| `Diversion` | Relayed, but Asterisk regenerates it — number and `reason` survive, the host part becomes this box's IP |
+| Custom `X-*` | **Not** relayed |
+
+To add a custom header, capture it as `__H_YOURS` in `[from-ns]` and add a
+matching `ExecIf` line in `[carrier-headers]` — both in
+`asterisk/etc/extensions.conf`, a couple of lines each.
+
+Note this box does not sign calls itself; it preserves whatever NetSapiens
+signed. If NetSapiens does *not* sign, nothing here changes that.
+
+## Setup
 
 Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law —
 see `asterisk/sounds/README.md`), and set the interval and prompt in
@@ -58,6 +148,34 @@ docker compose up -d --build
 ```
 
 The operator UI is on `http://127.0.0.1:8080` by default.
+
+## Stopping the announcement mid-call
+
+The UI lists every live call with its extension, dialed number, announcement
+state and play count. Each row has a **Stop** button that cuts the audio
+immediately — it deletes the running playback rather than waiting for the prompt
+to finish — and stops it repeating for the rest of that call. **Stop all** does
+the same for every call at once.
+
+The same thing over the API, if you would rather script it or bind it to a key:
+
+```sh
+curl -s http://127.0.0.1:8080/api/calls                      # find the channelId
+curl -X POST http://127.0.0.1:8080/api/calls/<channelId>/announce/stop
+curl -X POST http://127.0.0.1:8080/api/announce/stop-all     # everything, now
+```
+
+Stop is per call and permanent for that call — it clears the auto-announce flag,
+so it will not restart on the next interval. **Start** on the same row resumes it
+if needed.
+
+Note this is an *operator* control, not a caller one: whoever stops it needs the
+web UI or the API, not the phone. If you want the person on the call to stop it
+themselves with a DTMF digit, that is a small addition — say the word.
+
+The UI binds to `127.0.0.1` by default. To reach it from another machine, set
+`WEB_HOST=0.0.0.0` and put a reverse proxy with authentication in front of it;
+there is no auth on the API itself.
 
 Finally, point the NetSapiens outbound dial rule at this host **for the calls you
 want announced**, and add a failover route straight to the carrier (see *Failure
@@ -118,7 +236,10 @@ straight to the carrier.
 4. **911 guard.** Confirm an excluded destination never announces.
 5. **Degradation.** `docker compose stop controller`, then place an outbound
    call. It must still complete, without announcements.
-6. **Teardown.** Hang up from each side; `asterisk -rx "core show channels"`
+6. **Headers.** On a real outbound call, confirm with your carrier (or a capture)
+   that the `Identity` header arrives intact and attestation is unchanged from
+   what NetSapiens sent.
+7. **Teardown.** Hang up from each side; `asterisk -rx "core show channels"`
    should show no leftover `Snoop/` channels.
 
 ## Tests

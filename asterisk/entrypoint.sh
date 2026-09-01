@@ -33,6 +33,32 @@ render pjsip.conf
 render ari.conf
 render http.conf
 
+# Emit ONE identify object per host rather than a single comma-separated match.
+# Asterisk resolves hostnames at config load, and a single unresolvable entry
+# makes the whole identify object fail to load -- with a combined match that
+# takes every other host down with it, rejecting all inbound INVITEs. Split this
+# way, a bad entry only costs that one host.
+emit_identifies() {
+    local prefix="$1" endpoint="$2" hosts="$3" n=0 host
+    local IFS=','
+    for host in $hosts; do
+        host="$(echo "$host" | tr -d '[:space:]')"
+        [ -z "$host" ] && continue
+        n=$((n + 1))
+        cat >> /etc/asterisk/pjsip.conf <<IDENT
+
+[${prefix}-${n}]
+type = identify
+endpoint = ${endpoint}
+match = ${host}
+IDENT
+    done
+    echo "entrypoint: ${endpoint} will be identified by ${n} host(s)"
+}
+
+emit_identifies netsapiens-identify netsapiens "$NS_SIP_HOST"
+emit_identifies carrier-identify carrier "$CARRIER_SIP_HOST"
+
 # Carrier trunks are commonly IP-authenticated. Only wire up digest auth and a registration
 # when credentials were actually supplied, otherwise leave the endpoint unauthenticated.
 if [[ -n "$CARRIER_USER" && -n "$CARRIER_PASS" ]]; then
