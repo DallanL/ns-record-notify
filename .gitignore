@@ -3,3 +3,5 @@ node_modules/
 # The prompt is site-specific audio, not source. Keep your real recording out of
 # the repo (or force-add it deliberately with `git add -f`).
 asterisk/sounds/*.wav
+asterisk/sounds/*.ulaw
+asterisk/sounds/*.gsm
