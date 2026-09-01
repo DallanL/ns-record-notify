@@ -273,12 +273,13 @@ if needed.
 Someone on the call can stop it themselves by pressing a code — `*9` by default,
 set in `config/rules.yaml`:
 
-```yaml
-dtmf_stop:
-  digits: "*9"       # "" disables the feature
-  accept_from: any   # caller | callee | any
-  sequence_timeout_seconds: 5
+```sh
+DTMF_STOP_DIGITS=*9      # empty (DTMF_STOP_DIGITS=) disables the feature
+DTMF_ACCEPT_FROM=any     # caller | callee | any
 ```
+
+(or `dtmf_stop:` in `config/rules.yaml` — the env vars win, see
+*Configuration* below).
 
 It behaves exactly like the UI's Stop: audio cuts immediately and stays off for
 the rest of that call. The UI shows the active code in its header and records
@@ -320,15 +321,46 @@ lets ARI stay bound to `127.0.0.1`, where it is not reachable off-box.
 
 ## Configuration
 
-`config/rules.yaml` controls the prompt and the interval. It ships with
-`announcement.enabled: false` — leave it that way until step 1 of *Verifying*
-below passes.
+Settings live in two places:
 
-Reload it without dropping calls:
+| | `.env` | `config/rules.yaml` |
+| --- | --- | --- |
+| Holds | timing and DTMF stop code | everything, including the prompt and safety list |
+| Applies | on restart | live |
+| Wins | **yes**, when the variable is set | when the variable is unset |
+
+The four deployment-facing settings are overridable from `.env`:
 
 ```sh
-curl -X POST http://127.0.0.1:8080/api/reload
+ANNOUNCE_INITIAL_DELAY_SECONDS=3
+ANNOUNCE_INTERVAL_SECONDS=30
+DTMF_STOP_DIGITS=*9
+DTMF_ACCEPT_FROM=any
 ```
+
+These are read at **startup only**, so a change needs
+`docker compose up -d controller`, not `/api/reload`. An invalid value (a
+non-number, a negative interval, a non-DTMF character) is ignored with a warning
+and the YAML value is used instead. Setting `DTMF_STOP_DIGITS=` — defined but
+empty — disables the stop code, which is different from leaving it unset.
+
+To avoid guessing which source won, the controller says so at startup:
+
+```
+rules loaded {"intervalSeconds":"30 (ANNOUNCE_INTERVAL_SECONDS)",
+              "dtmfStop":"*9 (DTMF_STOP_DIGITS)", ...}
+```
+
+Everything else — the prompt, the enable switch, `max_duration_seconds`, the
+safety exclusions — lives in `config/rules.yaml` and reloads live without
+dropping calls:
+
+```sh
+curl -X POST http://127.0.0.1:8090/api/reload
+```
+
+It ships with `announcement.enabled: false` — leave it that way until step 1 of
+*Verifying* below passes.
 
 There is no per-user or per-destination targeting: routing decides what gets
 announced. The only exceptions are the `safety.exclude_dialed` list and, more

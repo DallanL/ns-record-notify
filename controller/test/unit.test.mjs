@@ -31,6 +31,58 @@ for (const d of ['911', '1911', '+1911', '112', '933', '999', '000']) {
 assert.equal(r.isBlockedDestination('5551212'), false);
 console.log('rules ok');
 
+// ---- environment overrides ----
+const rulesPath = new URL('../../config/rules.yaml', import.meta.url).pathname;
+const withEnv = (env, fn) => {
+  const saved = {};
+  for (const k of Object.keys(env)) { saved[k] = process.env[k]; 
+    if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+  try { return fn(); } finally {
+    for (const k of Object.keys(env)) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  }
+};
+
+withEnv({ ANNOUNCE_INTERVAL_SECONDS: '7', ANNOUNCE_INITIAL_DELAY_SECONDS: '0',
+          DTMF_STOP_DIGITS: '##', DTMF_ACCEPT_FROM: 'caller' }, () => {
+  const e = new Rules(rulesPath);
+  assert.equal(e.config.intervalSeconds, 7, 'interval from env');
+  assert.equal(e.config.initialDelaySeconds, 0, 'zero delay from env must be honoured');
+  assert.equal(e.config.dtmfDigits, '##', 'digits from env');
+  assert.equal(e.config.dtmfAcceptFrom, 'caller', 'accept_from from env');
+  assert.equal(e.sources.intervalSeconds, 'ANNOUNCE_INTERVAL_SECONDS');
+});
+
+// An empty digits var disables the feature -- distinct from being unset.
+withEnv({ DTMF_STOP_DIGITS: '' }, () => {
+  const e = new Rules(rulesPath);
+  assert.equal(e.config.dtmfDigits, '', 'empty env must disable, not fall back');
+  assert.equal(e.sources.dtmfDigits, 'DTMF_STOP_DIGITS');
+});
+
+// Unset falls back to the YAML value.
+withEnv({ DTMF_STOP_DIGITS: undefined, ANNOUNCE_INTERVAL_SECONDS: undefined }, () => {
+  const e = new Rules(rulesPath);
+  assert.equal(e.sources.dtmfDigits, 'rules.yaml');
+  assert.equal(e.sources.intervalSeconds, 'rules.yaml');
+});
+
+// Invalid values must not silently become NaN or a bad DTMF string.
+withEnv({ ANNOUNCE_INTERVAL_SECONDS: 'soon', DTMF_STOP_DIGITS: 'hello',
+          DTMF_ACCEPT_FROM: 'everyone' }, () => {
+  const e = new Rules(rulesPath);
+  assert.ok(Number.isFinite(e.config.intervalSeconds), 'bad interval must not become NaN');
+  assert.equal(e.sources.intervalSeconds, 'rules.yaml (invalid env)');
+  assert.equal(e.config.dtmfDigits, '*9', 'non-DTMF characters rejected');
+  assert.equal(e.config.dtmfAcceptFrom, 'any', 'unknown accept_from rejected');
+});
+withEnv({ ANNOUNCE_INTERVAL_SECONDS: '-5' }, () => {
+  const e = new Rules(rulesPath);
+  assert.ok(e.config.intervalSeconds >= 0, 'negative interval rejected');
+});
+console.log('env overrides ok');
+
 // ---- DTMF matcher ----
 const m = new DigitMatcher('*9', 5000);
 assert.equal(m.enabled, true);

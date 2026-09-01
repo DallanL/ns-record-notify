@@ -16,10 +16,12 @@ announcement:
   # Seconds between the START of one playback and the start of the next.
   # If the prompt is longer than this, the next play is skipped rather than
   # overlapping itself.
+  # Overridden by ANNOUNCE_INTERVAL_SECONDS in .env when that is set.
   interval_seconds: 30
 
   # Wait this long after the call is answered before the first playback, so the
   # announcement does not collide with the callee's "hello".
+  # Overridden by ANNOUNCE_INITIAL_DELAY_SECONDS in .env when that is set.
   initial_delay_seconds: 3
 
   # Safety valve: stop announcing after this long even if nobody hits stop.
@@ -33,6 +35,8 @@ dtmf_stop:
   # Use two digits rather than one. Whatever you choose still travels to the far
   # end -- this box observes DTMF, it cannot swallow it -- so a lone "*" or "0"
   # risks being pressed at a far-end IVR and silently killing the announcement.
+  # Overridden by DTMF_STOP_DIGITS in .env when that is set (including empty,
+  # which disables the feature).
   digits: "*9"
 
   # Who is allowed to press it:
@@ -41,6 +45,7 @@ dtmf_stop:
   #   any    - either side (default)
   # Consider "caller" if the announcement is a compliance notice you do not want
   # the outside party able to switch off.
+  # Overridden by DTMF_ACCEPT_FROM in .env when that is set.
   accept_from: any
 
   # A partial sequence is forgotten after this many seconds of no digits.
