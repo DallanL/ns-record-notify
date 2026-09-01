@@ -34,6 +34,7 @@ export class Announcer {
     this.playing = false;
     this.startedAt = null;
     this.playCount = 0;
+    this.failedPlays = 0;
     this.disposed = false;
   }
 
@@ -108,11 +109,27 @@ export class Announcer {
     this.timer = setTimeout(() => this.#tick(), Math.max(1000, this.config.intervalSeconds * 1000));
   }
 
-  /** Called by the registry when ARI reports one of our playbacks finished. */
-  notePlaybackFinished(playbackId) {
+  /**
+   * Called by the registry when ARI reports one of our playbacks finished.
+   *
+   * PlaybackFinished fires whether the playback succeeded or not, so the state
+   * field is the only thing that distinguishes them. A failure here almost
+   * always means Asterisk could not resolve the media -- worth shouting about,
+   * because everything else looks healthy while nobody hears anything.
+   */
+  notePlaybackFinished(playbackId, state) {
     if (playbackId !== this.playbackId) return;
     this.playing = false;
     this.playbackId = null;
+    if (state === 'failed') {
+      this.failedPlays += 1;
+      log.error('playback FAILED -- callers heard nothing', {
+        channelId: this.channelId,
+        media: this.config.media,
+        hint: 'check the file exists under Asterisk\'s data directory: '
+          + 'asterisk -rx "core show settings" | grep "Data directory"',
+      });
+    }
   }
 
   ownsPlayback(playbackId) {

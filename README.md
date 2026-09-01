@@ -121,6 +121,27 @@ Setting `NS_EXTERNAL_IP` and `CARRIER_EXTERNAL_IP` differently while both trunks
 share a bind address is refused at startup, since two transports cannot bind the
 same address and port.
 
+### Diagnosing a silent announcement
+
+If calls are fine but nobody hears the prompt, the controller now says so
+outright:
+
+```
+ERROR playback FAILED -- callers heard nothing {"media":"sound:custom/recording-notice", ...}
+```
+
+and the operator UI shows the failure count next to the plays. ARI's
+`PlaybackFinished` event fires whether a playback succeeded or failed — only its
+`state` field distinguishes them — so "the playback event arrived" is not
+evidence that anyone heard anything. Check `state`, or check Asterisk for
+`Playback failed`:
+
+```sh
+docker compose logs asterisk | grep "Playback failed"
+```
+
+The usual cause is the media path above.
+
 ### Diagnosing no-audio
 
 ```sh
@@ -198,6 +219,18 @@ signed. If NetSapiens does *not* sign, nothing here changes that.
 Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law —
 see `asterisk/sounds/README.md`), and set the interval and prompt in
 `config/rules.yaml`.
+
+The directory is mounted to `/usr/share/asterisk/sounds/custom` inside the
+container. That path matters: Asterisk searches for sounds under
+`<astdatadir>/sounds`, and on this distro `astdatadir` is `/usr/share/asterisk`,
+**not** `/var/lib/asterisk`. A prompt placed outside that tree is silently
+unresolvable — every playback fails while the call itself sounds perfectly
+normal. Confirm with:
+
+```sh
+docker exec ns-announce-asterisk asterisk -rx "core show settings" | grep "Data directory"
+docker exec ns-announce-asterisk ls /usr/share/asterisk/sounds/custom/
+```
 
 ```sh
 docker compose up -d --build

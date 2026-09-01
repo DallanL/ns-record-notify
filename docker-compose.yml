@@ -10,7 +10,9 @@ services:
     network_mode: host
     env_file: .env
     volumes:
-      - ./asterisk/sounds:/var/lib/asterisk/sounds/custom:ro
+      # Must be under Asterisk's data directory (/usr/share/asterisk), which is
+      # where <astdatadir>/sounds is searched. /var/lib/asterisk is NOT searched.
+      - ./asterisk/sounds:/usr/share/asterisk/sounds/custom:ro
     healthcheck:
       test: ["CMD", "asterisk", "-rx", "core show uptime"]
       interval: 30s

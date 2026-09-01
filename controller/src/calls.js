@@ -199,7 +199,7 @@ export class CallRegistry {
     if (!playbackId) return;
     for (const call of this.calls.values()) {
       if (call.announcer.ownsPlayback(playbackId)) {
-        call.announcer.notePlaybackFinished(playbackId);
+        call.announcer.notePlaybackFinished(playbackId, event.playback?.state);
         return;
       }
     }
@@ -237,6 +237,7 @@ export class CallRegistry {
       reason: c.reason,
       announcement: c.announcer.status,
       plays: c.announcer.playCount,
+      failedPlays: c.announcer.failedPlays,
     }));
   }
 

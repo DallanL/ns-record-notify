@@ -23,15 +23,16 @@ RUN rm -f /etc/asterisk/extensions.ael /etc/asterisk/extensions.lua \
         /etc/asterisk/pjsip_wizard.conf
 
 COPY etc/ /etc/asterisk/
-COPY sounds/ /var/lib/asterisk/sounds/custom/
+COPY sounds/ /usr/share/asterisk/sounds/custom/
 COPY entrypoint.sh /entrypoint.sh
 
 # The entrypoint renders templates into /etc/asterisk at runtime, so the
 # asterisk user needs to own it.
 RUN chmod +x /entrypoint.sh \
-    && mkdir -p /var/run/asterisk /var/log/asterisk /var/spool/asterisk /var/lib/asterisk/sounds/custom \
+    && mkdir -p /var/run/asterisk /var/log/asterisk /var/spool/asterisk /usr/share/asterisk/sounds/custom \
     && chown -R asterisk:asterisk \
-        /etc/asterisk /var/lib/asterisk /var/log/asterisk /var/spool/asterisk /var/run/asterisk
+        /etc/asterisk /var/lib/asterisk /var/log/asterisk /var/spool/asterisk /var/run/asterisk \
+        /usr/share/asterisk/sounds/custom
 
 USER asterisk
 ENTRYPOINT ["/entrypoint.sh"]

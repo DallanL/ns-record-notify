@@ -126,7 +126,12 @@ function render(data) {
     tag.className = `tag ${call.announcement}`;
     tag.textContent = call.announcement;
     state.append(tag);
-    tr.append(state, cell(String(call.plays)), cell(call.reason, 'reason'));
+    const plays = document.createElement('td');
+    plays.textContent = call.failedPlays
+      ? `${call.plays} (${call.failedPlays} failed)`
+      : String(call.plays);
+    if (call.failedPlays) plays.style.color = 'var(--stop)';
+    tr.append(state, plays, cell(call.reason, 'reason'));
 
     const actions = document.createElement('td');
     const running = call.announcement !== 'idle';

@@ -13,8 +13,11 @@ console.log('extractExtension ok');
 
 // ---- Rules ----
 const r = new Rules(new URL('../../config/rules.yaml', import.meta.url).pathname);
-// shipped default is disabled
-assert.equal(r.evaluate({ dialed: '5551212' }).announce, false);
+// Exercise both states explicitly rather than asserting whatever the live
+// config happens to be set to -- this file is also the deployed config.
+r.config.enabled = false;
+assert.equal(r.evaluate({ dialed: '5551212' }).announce, false, 'disabled must not announce');
+assert.match(r.evaluate({ dialed: '5551212' }).reason, /disabled/);
 r.config.enabled = true;
 // every routed call is in scope regardless of who placed it or what was dialed
 assert.equal(r.evaluate({ dialed: '5551212' }).announce, true);
@@ -98,6 +101,16 @@ assert.ok(!calls.some((c) => c[0] === 'hangup'), 'stop must leave the snoop atta
 const after = calls.filter((c) => c[0] === 'play').length;
 await new Promise((res) => setTimeout(res, 1300));
 assert.equal(calls.filter((c) => c[0] === 'play').length, after, 'no plays after stop');
+
+// a failed playback must be counted and not mistaken for a successful one
+const before = a.failedPlays;
+a.playbackId = 'pb-x'; a.playing = true;
+a.notePlaybackFinished('pb-x', 'failed');
+assert.equal(a.failedPlays, before + 1, 'failed playback must be recorded');
+assert.equal(a.playing, false);
+a.playbackId = 'pb-y'; a.playing = true;
+a.notePlaybackFinished('pb-y', 'done');
+assert.equal(a.failedPlays, before + 1, 'a successful playback must not count as failed');
 
 // stop is idempotent
 await a.stop();
