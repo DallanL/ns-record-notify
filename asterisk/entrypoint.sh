@@ -30,6 +30,8 @@ export ARI_PORT="${ARI_PORT:-8088}"
 export EXTERNAL_IP NS_SIP_HOST CARRIER_SIP_HOST ARI_USER ARI_PASS
 CARRIER_USER="${CARRIER_USER:-}"
 CARRIER_PASS="${CARRIER_PASS:-}"
+NS_AUTH_USER="${NS_AUTH_USER:-}"
+NS_AUTH_PASS="${NS_AUTH_PASS:-}"
 
 ENVSUBST_VARS='${EXTERNAL_IP} ${LOCAL_NET} ${NS_SIP_HOST} ${NS_SIP_PORT} ${CARRIER_SIP_HOST} ${CARRIER_SIP_PORT} ${ARI_USER} ${ARI_PASS} ${ARI_PORT} ${NS_TRANSPORT} ${CARRIER_TRANSPORT}'
 
@@ -118,6 +120,45 @@ IDENT
 emit_identifies netsapiens-identify netsapiens "$NS_SIP_HOST"
 emit_identifies carrier-identify carrier "$CARRIER_SIP_HOST"
 
+# Require NetSapiens to prove itself with digest auth, in ADDITION to the IP
+# identify above -- not instead of it. The identify still decides which endpoint
+# an INVITE belongs to; the auth then decides whether it is allowed in.
+#
+# This is what closes off blind source-IP spoofing. Identify alone trusts a
+# field the sender controls, so anyone who can forge a packet from a NetSapiens
+# address can place calls on our carrier trunk and never needs to see a reply --
+# with toll fraud the payoff is the number they dialled, not the audio. Digest
+# auth makes the caller answer a challenge, and our 401 (with its nonce) is
+# routed to the REAL address, which a blind spoofer never receives.
+#
+# The AOR exists only so NetSapiens can REGISTER if its trunk is configured to.
+# Nothing is ever dialled towards these contacts -- [from-carrier] rejects every
+# inbound call -- but a trunk set to register will retry forever against a box
+# that has no AOR to bind to.
+if [[ -n "$NS_AUTH_USER" && -n "$NS_AUTH_PASS" ]]; then
+    cat >> /etc/asterisk/pjsip.conf <<PJSIP
+
+[netsapiens-auth]
+type = auth
+auth_type = userpass
+username = ${NS_AUTH_USER}
+password = ${NS_AUTH_PASS}
+
+[netsapiens-aor]
+type = aor
+; One contact per NetSapiens core, with headroom. remove_existing = no stops a
+; registering core from evicting its peers, which share this one AOR.
+max_contacts = 10
+remove_existing = no
+PJSIP
+    sed -i 's/^;auth = netsapiens-auth$/auth = netsapiens-auth/' /etc/asterisk/pjsip.conf
+    sed -i 's/^;aors = netsapiens-aor$/aors = netsapiens-aor/' /etc/asterisk/pjsip.conf
+    echo "entrypoint: NetSapiens digest auth REQUIRED for user ${NS_AUTH_USER}"
+else
+    echo "entrypoint: WARNING - no NS_AUTH_USER/NS_AUTH_PASS set. NetSapiens is trusted"
+    echo "entrypoint: on source IP alone, which a spoofed packet can forge."
+fi
+
 # Carrier trunks are commonly IP-authenticated. Only wire up digest auth and a registration
 # when credentials were actually supplied, otherwise leave the endpoint unauthenticated.
 if [[ -n "$CARRIER_USER" && -n "$CARRIER_PASS" ]]; then
@@ -131,7 +172,7 @@ password = ${CARRIER_PASS}
 
 [carrier-reg]
 type = registration
-transport = transport-udp
+transport = ${CARRIER_TRANSPORT}
 outbound_auth = carrier-auth
 server_uri = sip:${CARRIER_SIP_HOST}:${CARRIER_SIP_PORT}
 client_uri = sip:${CARRIER_USER}@${CARRIER_SIP_HOST}
