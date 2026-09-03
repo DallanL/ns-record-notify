@@ -8,6 +8,30 @@ a configurable interval, and an operator can stop it from a web UI at any time.
 point the NetSapiens dial rule at this host for the calls that need the
 announcement, and route everything else straight to the carrier as it goes today.
 
+## Contents
+
+- [Why it works this way](#why-it-works-this-way)
+- [Configuring the trunks](#configuring-the-trunks)
+  - [Media addressing](#media-addressing)
+  - [Diagnosing no-audio](#diagnosing-no-audio)
+  - [Multiple NetSapiens servers](#multiple-netsapiens-servers)
+- [SIP header passthrough](#sip-header-passthrough)
+- [Setup](#setup)
+- [Managing the prompt](#managing-the-prompt)
+  - [Installing or replacing it](#installing-or-replacing-it)
+  - [Do not hand-convert](#do-not-hand-convert)
+  - [Recording guidance](#recording-guidance)
+  - [When the prompt does not play](#when-the-prompt-does-not-play)
+- [Stopping the announcement mid-call](#stopping-the-announcement-mid-call)
+  - [From the phone, with DTMF](#from-the-phone-with-dtmf)
+- [Docker vs bare metal](#docker-vs-bare-metal)
+- [Configuration](#configuration)
+- [Failure modes](#failure-modes)
+- [Verifying](#verifying)
+- [Tests](#tests)
+  - [Integration suite (needs Docker)](#integration-suite-needs-docker)
+- [Known Asterisk behaviour worth knowing](#known-asterisk-behaviour-worth-knowing)
+
 ## Why it works this way
 
 The NetSapiens API cannot inject audio. The v2 create-call endpoint exposes only
@@ -120,37 +144,6 @@ entrypoint: split transports -- NetSapiens 10.0.0.2 advertising 10.0.0.2, carrie
 Setting `NS_EXTERNAL_IP` and `CARRIER_EXTERNAL_IP` differently while both trunks
 share a bind address is refused at startup, since two transports cannot bind the
 same address and port.
-
-### Diagnosing a silent announcement
-
-If calls are fine but nobody hears the prompt, the controller now says so
-outright:
-
-```
-ERROR playback FAILED -- callers heard nothing {"media":"sound:custom/recording-notice", ...}
-```
-
-and the operator UI shows the failure count next to the plays. ARI's
-`PlaybackFinished` event fires whether a playback succeeded or failed — only its
-`state` field distinguishes them — so "the playback event arrived" is not
-evidence that anyone heard anything. Check `state`, or check Asterisk for
-`Playback failed`:
-
-```sh
-docker compose logs asterisk | grep "Playback failed"
-```
-
-The usual cause is the media path above.
-
-If playback reports success and callers still hear nothing, **measure the prompt
-itself** — a file can be technically valid, play "successfully", and still be
-inaudible:
-
-```sh
-sox asterisk/sounds/recording-notice.wav -n stat 2>&1 | grep -E "Maximum|RMS"
-```
-
-Expect peak 0.5-0.9 and RMS 0.05-0.2. An RMS in the thousandths is silence.
 
 ### Diagnosing no-audio
 
@@ -266,6 +259,107 @@ docker compose up -d --build
 
 The operator UI is on `http://127.0.0.1:8080` by default.
 
+## Managing the prompt
+
+### Installing or replacing it
+
+```sh
+./scripts/prompt.sh install path/to/your-recording.wav
+```
+
+That is the whole procedure. The script converts to both formats Asterisk can
+read, normalises the level, keeps your original as `recording-notice.source.wav`,
+and then validates the result — including asking Asterisk itself whether it can
+open each file.
+
+**No restart or rebuild is needed.** `asterisk/sounds/` is bind-mounted into the
+container, so a new prompt is live for the next call.
+
+To re-check what is installed at any time:
+
+```sh
+./scripts/prompt.sh check
+```
+
+```
+recording-notice.wav         RIFF (little-endian) data, WAVE audio, Microsoft PCM, 16 bit, mono 8000 Hz
+OK       .wav is 16-bit PCM
+speech peak 0.544495 (want 0.50-0.90), speech RMS 0.068593 (want 0.05-0.20)
+OK       level is in range
+OK       Asterisk opened recording-notice.wav
+OK       Asterisk opened recording-notice.ulaw
+```
+
+### Do not hand-convert
+
+Exporting "8 kHz, 8-bit, mono, µ-law" from an audio editor describes the audio
+correctly and still produces a file Asterisk cannot open, because it writes a
+µ-law **WAV**. `format_wav` reads 16-bit signed linear PCM only. Raw µ-law is
+fine, but it has to be headerless, as `.ulaw`.
+
+This one is worth understanding rather than just avoiding, because of how it
+fails. Asterisk resolves `sound:custom/recording-notice` by basename and tries
+each extension it knows. If the `.wav` is unreadable it silently falls back to
+the `.ulaw` beside it — which, after an install that only replaced the `.wav`, is
+the *previous* prompt. So the call is healthy, no error appears anywhere, and you
+hear the old greeting. That is not a hypothetical; it is what happened here.
+
+### Recording guidance
+
+Aim for **speech** peak 0.50–0.90 and **speech** RMS 0.05–0.20. Measure the
+speech rather than the file: trailing silence drags whole-file RMS down and makes
+a perfectly good prompt look too quiet. `prompt.sh check` already does this.
+
+Keep it short. The prompt plays over a live conversation on an interval, so a
+2–4 second notice is usually right; anything longer starts talking over the call
+more than it informs.
+
+### When the prompt does not play
+
+If calls are fine but nobody hears the prompt, the controller now says so
+outright:
+
+```
+ERROR playback FAILED -- callers heard nothing {"media":"sound:custom/recording-notice", ...}
+```
+
+and the operator UI shows the failure count next to the plays. ARI's
+`PlaybackFinished` event fires whether a playback succeeded or failed — only its
+`state` field distinguishes them — so "the playback event arrived" is not
+evidence that anyone heard anything. Check `state`, or check Asterisk for
+`Playback failed`:
+
+```sh
+docker compose logs asterisk | grep "Playback failed"
+```
+
+Start with the checker — it covers every cause below in one command, and asks
+Asterisk directly rather than inferring:
+
+```sh
+./scripts/prompt.sh check
+```
+
+The three things that produce a healthy call with no announcement, in the order
+they actually occur:
+
+1. **The file is unreadable and a stale one plays instead.** See
+   [Do not hand-convert](#do-not-hand-convert). This is the only failure where
+   you hear *something*, which makes it the easiest to misread.
+2. **The prompt is too quiet.** A file can be technically valid, play
+   "successfully", and still be inaudible under a live conversation.
+3. **The file is not where Asterisk looks.** Sounds resolve under
+   `<astdatadir>/sounds`, which for this build is `/var/lib/asterisk`:
+
+   ```sh
+   docker exec ns-announce-asterisk asterisk -rx "core show settings" | grep "Data directory"
+   docker exec ns-announce-asterisk ls /var/lib/asterisk/sounds/custom/
+   ```
+
+If the prompt checks out and callers still hear nothing, the problem is the media
+path rather than the prompt — see [Media addressing](#media-addressing) and
+[Diagnosing no-audio](#diagnosing-no-audio).
+
 ## Stopping the announcement mid-call
 
 The UI lists every live call with its extension, dialed number, announcement
@@ -328,7 +422,7 @@ Finally, point the NetSapiens outbound dial rule at this host **for the calls yo
 want announced**, and add a failover route straight to the carrier (see *Failure
 modes* below).
 
-### Docker vs bare metal
+## Docker vs bare metal
 
 Docker is fine — **both containers use `network_mode: host`**, which is
 deliberate. Virtualization is not the latency risk here; Docker's *bridge*
