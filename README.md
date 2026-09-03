@@ -230,17 +230,24 @@ Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law
 see `asterisk/sounds/README.md`), and set the interval and prompt in
 `config/rules.yaml`.
 
-The directory is mounted to `/usr/share/asterisk/sounds/custom` inside the
+The directory is mounted to `/var/lib/asterisk/sounds/custom` inside the
 container. That path matters: Asterisk searches for sounds under
-`<astdatadir>/sounds`, and on this distro `astdatadir` is `/usr/share/asterisk`,
-**not** `/var/lib/asterisk`. A prompt placed outside that tree is silently
-unresolvable — every playback fails while the call itself sounds perfectly
-normal. Confirm with:
+`<astdatadir>/sounds`, and for our source build `astdatadir` is
+`/var/lib/asterisk`. A prompt placed outside that tree is silently unresolvable
+— every playback fails while the call itself sounds perfectly normal.
+
+**This path changed with the Asterisk 22 upgrade.** The old Ubuntu package
+compiled in `/usr/share/asterisk`; a source build uses `/var/lib/asterisk`, which
+is where its core sounds and XML documentation live too. Confirm with:
 
 ```sh
 docker exec ns-announce-asterisk asterisk -rx "core show settings" | grep "Data directory"
-docker exec ns-announce-asterisk ls /usr/share/asterisk/sounds/custom/
+docker exec ns-announce-asterisk ls /var/lib/asterisk/sounds/custom/
 ```
+
+Do not "fix" a mismatch by editing `astdatadir` in `asterisk.conf` to point
+somewhere else: the XML documentation lives under the same directory, and moving
+it stops Asterisk from starting at all.
 
 ```sh
 docker compose up -d --build
@@ -412,10 +419,35 @@ cd controller && npm install && npm test
 announcer state machine. `test/e2e.test.mjs` boots the real controller against a fake ARI
 server and drives a call through classify → answer → announce → stop → hangup.
 
-Neither test needs Asterisk. The behaviour that *does* need real Asterisk — that
-`whisper=both` injects audio and that snoop channels do not accumulate — was
-verified against Asterisk 20.6 during development; see the note in `announcer.js`
-about snoop lifetime.
+Neither test needs Asterisk.
+
+### Integration suite (needs Docker)
+
+```sh
+./test/integration/run.sh
+```
+
+Builds the image, stands up an isolated Asterisk plus a fake carrier on their own
+Docker network, and drives raw SIP at it. It asserts the properties that only a
+real stack can show: that an unauthenticated trunk is challenged, that a wrong
+password is refused, that both concurrency caps fire, that emergency calls bypass
+them, and that the identity headers survive the B2BUA hop.
+
+Two things about it are deliberate and worth preserving.
+
+It asserts what the **carrier** was asked to dial, not the response the caller
+got. A `Goto` that clobbered `${EXTEN}` once sent 911 to `sip:emergency@` while
+still returning a healthy `180 Ringing` — only the carrier-side view caught it.
+
+The fake carrier holds calls at `180 Ringing` instead of answering, because a cap
+is only observable while calls stay up. `ANSWER=1` makes it answer instead, which
+is what the announcement path needs — a snoop has nothing to whisper into while a
+call is still ringing.
+
+When checking that a prompt plays, confirm a **failure is detectable** before
+trusting a pass: point `media` at a nonexistent file and check the controller
+logs `playback FAILED`. `PlaybackFinished` fires whether playback succeeded or
+not, so "no error appeared" is not evidence on its own.
 
 ## Known Asterisk behaviour worth knowing
 

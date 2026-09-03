@@ -5,3 +5,5 @@ node_modules/
 asterisk/sounds/*.wav
 asterisk/sounds/*.ulaw
 asterisk/sounds/*.gsm
+__pycache__/
+*.pyc
