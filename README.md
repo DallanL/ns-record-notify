@@ -226,9 +226,20 @@ signed. If NetSapiens does *not* sign, nothing here changes that.
 
 ## Setup
 
-Then put the prompt at `asterisk/sounds/recording-notice.wav` (8 kHz mono µ-law —
-see `asterisk/sounds/README.md`), and set the interval and prompt in
-`config/rules.yaml`.
+Then install the prompt with the script — do not hand-convert it:
+
+```sh
+./scripts/prompt.sh install path/to/your-recording.wav
+```
+
+It converts to both formats Asterisk can read, normalises the level, and asks
+Asterisk itself whether it can open the result. `./scripts/prompt.sh check`
+re-validates at any time. Exporting "8 kHz 8-bit mono µ-law" by hand produces a
+µ-law **WAV**, which `format_wav` cannot open — Asterisk then falls back to a
+stale prompt and you hear the *old* greeting on a call that sounds perfectly
+normal. See `asterisk/sounds/README.md`.
+
+Set the interval and prompt in `config/rules.yaml`.
 
 The directory is mounted to `/var/lib/asterisk/sounds/custom` inside the
 container. That path matters: Asterisk searches for sounds under

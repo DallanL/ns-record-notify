@@ -7,3 +7,5 @@ asterisk/sounds/*.ulaw
 asterisk/sounds/*.gsm
 __pycache__/
 *.pyc
+asterisk/sounds/*.bak
+asterisk/sounds/*.source.wav

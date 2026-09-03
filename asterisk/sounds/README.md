@@ -1,4 +1,34 @@
-# Announcement audio
+# Announcement prompt
+
+**Use the script — do not hand-convert:**
+
+```sh
+./scripts/prompt.sh install path/to/your-recording.wav   # convert + install
+./scripts/prompt.sh check                                # validate what is installed
+```
+
+It writes both `recording-notice.wav` (16-bit PCM) and `recording-notice.ulaw`
+(raw mu-law), normalises the level, keeps your original as
+`recording-notice.source.wav`, and asks Asterisk itself whether it can open the
+result. No restart is needed -- this directory is bind-mounted.
+
+## Why not just export a mu-law file yourself
+
+"8 kHz, 8-bit, mono, mu-law" describes the *audio* correctly, but it is not the
+whole story: Asterisk's `format_wav` reads **16-bit signed linear PCM only**. A
+mu-law-encoded `.wav` cannot be opened at all. Asterisk then quietly falls back
+to another extension it finds under the same basename -- usually a stale prompt
+from a previous install -- so the call sounds completely normal and you hear the
+*old* greeting. Raw mu-law is fine, but it must be headerless, as `.ulaw`.
+
+The other silent failure is level. A prompt whispered under a live conversation
+is inaudible even though every log line says it played. Target speech peak
+0.50-0.90 and speech RMS 0.05-0.20; measure the *speech*, since trailing silence
+drags whole-file RMS down and makes a good prompt look too quiet.
+
+Both failures are what `prompt.sh check` exists to catch.
+
+---
 
 Drop the prompt here as `recording-notice.wav`. It is mounted read-only into the
 Asterisk container at `/var/lib/asterisk/sounds/custom/`, which is why
