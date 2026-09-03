@@ -79,6 +79,14 @@ class Caller:
                 break
             raw.append(msg)
             first = msg.split('\r\n')[0]
+            if first.startswith('SIP/2.0 2'):
+                # A 2xx completes the dialog: remember the remote tag and target
+                # so the call can be torn down later, and ACK it. Without the ACK
+                # Asterisk retransmits the 200 and eventually tears the call down
+                # on its own, which silently changes concurrency mid-suite.
+                d['to_tag'] = _param(msg, 'To', 'tag')
+                d['remote_target'] = _contact_uri(msg) or d['uri']
+                self._ack(d)
             if first not in status_lines:
                 status_lines.append(first)
                 # Stop at the first non-provisional response; 100/180 are just
@@ -102,6 +110,35 @@ class Caller:
         auth = digest_for(challenge, user, password, first['uri'])
         return self.invite(dest, auth=auth, extra_headers=extra_headers, dialog=first['dialog'])
 
+    def _ack(self, d):
+        s = d['sock']
+        lport = s.getsockname()[1]
+        msg = '\r\n'.join([
+            f'ACK {d["remote_target"]} SIP/2.0',
+            f'Via: SIP/2.0/UDP {self.host_ip}:{lport};branch=z9hG4bK{uuid.uuid4().hex}',
+            f'From: <sip:{self.caller_id}@{self.host_ip}>;tag={d["tag"]}',
+            f'To: <{d["uri"]}>;tag={d["to_tag"]}',
+            f'Call-ID: {d["call_id"]}@{self.host_ip}',
+            f'CSeq: {d["cseq"]} ACK',
+            'Max-Forwards: 70', 'Content-Length: 0', '', '',
+        ])
+        s.sendto(msg.encode(), self.target)
+
+    def _bye(self, d):
+        s = d['sock']
+        lport = s.getsockname()[1]
+        d['cseq'] += 1
+        msg = '\r\n'.join([
+            f'BYE {d["remote_target"]} SIP/2.0',
+            f'Via: SIP/2.0/UDP {self.host_ip}:{lport};branch=z9hG4bK{uuid.uuid4().hex}',
+            f'From: <sip:{self.caller_id}@{self.host_ip}>;tag={d["tag"]}',
+            f'To: <{d["uri"]}>;tag={d["to_tag"]}',
+            f'Call-ID: {d["call_id"]}@{self.host_ip}',
+            f'CSeq: {d["cseq"]} BYE',
+            'Max-Forwards: 70', 'Content-Length: 0', '', '',
+        ])
+        s.sendto(msg.encode(), self.target)
+
     def hangup_all(self):
         """CANCEL every call this caller has outstanding.
 
@@ -111,6 +148,14 @@ class Caller:
         than actually failing.
         """
         for d in self._dialogs:
+            try:
+                # An answered call needs a BYE; CANCEL is only valid while the
+                # INVITE transaction is still pending.
+                if d.get('to_tag'):
+                    self._bye(d)
+                    continue
+            except OSError:
+                continue
             s = d['sock']
             lport = s.getsockname()[1]
             msg = '\r\n'.join([
@@ -149,3 +194,19 @@ def challenge_of(raw_messages):
         if found:
             return found.group(1).strip()
     return None
+
+
+def _param(msg, header, name):
+    line = re.search(rf'^{header}:\s*(.*)$', msg, re.I | re.M)
+    if not line:
+        return ''
+    found = re.search(rf'{name}=([^;\s>]+)', line.group(1))
+    return found.group(1) if found else ''
+
+
+def _contact_uri(msg):
+    line = re.search(r'^Contact:\s*(.*)$', msg, re.I | re.M)
+    if not line:
+        return ''
+    found = re.search(r'<([^>]+)>', line.group(1))
+    return found.group(1) if found else line.group(1).strip()

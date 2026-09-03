@@ -427,11 +427,19 @@ Neither test needs Asterisk.
 ./test/integration/run.sh
 ```
 
-Builds the image, stands up an isolated Asterisk plus a fake carrier on their own
-Docker network, and drives raw SIP at it. It asserts the properties that only a
-real stack can show: that an unauthenticated trunk is challenged, that a wrong
-password is refused, that both concurrency caps fire, that emergency calls bypass
-them, and that the identity headers survive the B2BUA hop.
+Builds the images, stands up an isolated Asterisk plus a fake carrier on their own
+Docker network, and drives raw SIP at it. Two phases, 20 checks:
+
+**Phase 1 — signalling**, with no controller running, which also exercises the
+`STASISSTATUS=FAILED` fallback: every call here completes with Stasis
+unavailable. Asserts that an unauthenticated trunk is challenged, a wrong
+password is refused, both concurrency caps fire, emergency calls bypass them, and
+the identity headers survive the B2BUA hop.
+
+**Phase 2 — the announcement path**, with the controller attached and the carrier
+answering. Asserts that ARI connects, the snoop attaches, Asterisk opens the
+prompt, and it repeats on the interval — then flips `media` to a nonexistent file
+and asserts the failure *is* reported.
 
 Two things about it are deliberate and worth preserving.
 

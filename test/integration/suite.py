@@ -8,28 +8,18 @@ caller got -- a Goto that clobbered ${EXTEN} once sent 911 to "sip:emergency@"
 while still returning a perfectly healthy 180 Ringing to the caller.
 """
 import json
-import subprocess
 import time
 import sys
 
+from checks import check, logs, summary
 from sipdrive import Caller
 
 ASTERISK = ('127.0.0.1', 15060)
 HOST_IP = '172.29.0.1'
 NS_USER, NS_PASS = 'nsuser', 'testpass'
 
-results = []
-
-
-def check(name, got, want, detail=''):
-    ok = want in got if isinstance(want, str) else want(got)
-    results.append((ok, name, got, detail))
-    print(f'  {"PASS" if ok else "FAIL"}  {name}\n        -> {got}{("  " + detail) if detail else ""}')
-    return ok
-
-
 def carrier_invites():
-    out = subprocess.run(['docker', 'logs', 'itest-carrier'], capture_output=True, text=True).stdout
+    out = logs('itest-carrier')
     rows = []
     for line in out.splitlines():
         line = line.strip()
@@ -87,13 +77,7 @@ def main():
     check('P-Asserted-Identity is relayed', got.get('pai', ''), '+15551110005')
     check('Diversion is relayed', got.get('diversion', ''), '+15550009999')
 
-    failed = [r for r in results if not r[0]]
-    print(f'\n{"="*62}\n{len(results) - len(failed)}/{len(results)} passed')
-    if failed:
-        print('FAILED:')
-        for _, name, got, _d in failed:
-            print(f'  - {name}: {got}')
-    return 1 if failed else 0
+    return summary('signalling')
 
 
 if __name__ == '__main__':
