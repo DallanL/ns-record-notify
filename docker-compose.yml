@@ -19,9 +19,10 @@ services:
       - ALL
     env_file: .env
     volumes:
-      # Must be under Asterisk's data directory (/usr/share/asterisk), which is
-      # where <astdatadir>/sounds is searched. /var/lib/asterisk is NOT searched.
-      - ./asterisk/sounds:/usr/share/asterisk/sounds/custom:ro
+      # Must be under Asterisk's data directory, which is where <astdatadir>/sounds
+      # is searched. For our source build that is /var/lib/asterisk -- the distro
+      # package used /usr/share/asterisk, so this path changed with the upgrade.
+      - ./asterisk/sounds:/var/lib/asterisk/sounds/custom:ro
     healthcheck:
       test: ["CMD", "asterisk", "-rx", "core show uptime"]
       interval: 30s
