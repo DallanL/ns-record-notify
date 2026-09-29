@@ -24,12 +24,16 @@ SUBNET=172.29.0.0/16
 # containers, and would delete this directory before it is ever used.
 BADCFG=""
 cleanup() {
-    docker rm -f itest-asterisk itest-carrier itest-ctl >/dev/null 2>&1 || true
+    docker rm -f itest-asterisk itest-carrier itest-carrier2 itest-ctl >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     [ -n "$BADCFG" ] && rm -rf "$BADCFG"
     return 0
 }
-trap cleanup EXIT
+# ITEST_KEEP=1 leaves the containers up afterwards, for poking at a failure.
+# cleanup() itself is also called once mid-script to clear stale containers, so
+# the exit trap is a separate function.
+teardown() { [ -n "${ITEST_KEEP:-}" ] && { echo "ITEST_KEEP set: leaving containers up"; return 0; }; cleanup; }
+trap teardown EXIT
 
 if [ -z "$IMAGE" ]; then
     IMAGE=ns-announce-asterisk:itest
@@ -40,22 +44,27 @@ fi
 cleanup
 docker network create --subnet "$SUBNET" "$NET" >/dev/null
 
-start_carrier() {  # $1 = "answer" to make it answer instead of ringing forever
-    docker rm -f itest-carrier >/dev/null 2>&1 || true
-    docker run -d --name itest-carrier --network "$NET" --ip 172.29.0.3 \
-        ${1:+-e ANSWER=1} \
+start_carrier() {  # name ip [extra docker args, e.g. -e ANSWER=1]
+    local name="$1" ip="$2"; shift 2
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" --network "$NET" --ip "$ip" "$@" \
         -v "$HERE/fake-carrier.js:/app/fake-carrier.js:ro" \
         node:20-bookworm-slim node /app/fake-carrier.js >/dev/null
 }
-start_carrier
+# Two gateways, as a carrier with a failover IP would publish. The first is the
+# one every ordinary test dials; the second only matters to the failover phase.
+start_carrier itest-carrier 172.29.0.3
+start_carrier itest-carrier2 172.29.0.4
 
 docker run -d --name itest-asterisk --network "$NET" --ip 172.29.0.2 \
     -p 15060:5060/udp \
     --cap-drop ALL --security-opt no-new-privileges \
     -e EXTERNAL_IP=172.29.0.2 -e LOCAL_NET=172.29.0.0/16 \
-    -e NS_SIP_HOST=172.29.0.1 -e CARRIER_SIP_HOST=172.29.0.3 \
+    -e NS_SIP_HOST=172.29.0.1 -e CARRIER_SIP_HOST=172.29.0.3,172.29.0.4 \
+    -e CARRIER_RESPONSE_TIMEOUT_MS=6400 -e CARRIER_QUALIFY_SECONDS=5 \
     -e ARI_USER=itest -e ARI_PASS=itest \
     -e NS_AUTH_USER=nsuser -e NS_AUTH_PASS=testpass \
+    -e ALLOW_INSECURE_DEFAULTS=1 \
     -e MAX_CONCURRENT_CALLS=2 -e MAX_CONCURRENT_PER_CALLER=1 \
     "$IMAGE" >/dev/null
 
@@ -70,7 +79,7 @@ done
 # The carrier endpoint has to be qualified Available before Asterisk will build
 # an outbound channel to it; without this the concurrency tests would all fail
 # with "no route" for reasons that have nothing to do with the caps.
-docker exec itest-asterisk asterisk -rx "pjsip qualify carrier" >/dev/null 2>&1 || true
+for g in carrier-1 carrier-2; do docker exec itest-asterisk asterisk -rx "pjsip qualify $g" >/dev/null 2>&1 || true; done
 sleep 2
 
 echo
@@ -94,9 +103,9 @@ rc=0
 # ---------------------------------------------------------------------------
 echo
 echo "--- phase 2: restarting carrier in answering mode ---"
-start_carrier answer
+start_carrier itest-carrier 172.29.0.3 -e ANSWER=1
 sleep 2
-docker exec itest-asterisk asterisk -rx "pjsip qualify carrier" >/dev/null 2>&1 || true
+for g in carrier-1 carrier-2; do docker exec itest-asterisk asterisk -rx "pjsip qualify $g" >/dev/null 2>&1 || true; done
 
 CONTROLLER_IMAGE="${CONTROLLER_IMAGE:-ns-announce-controller:itest}"
 if ! docker image inspect "$CONTROLLER_IMAGE" >/dev/null 2>&1; then
@@ -112,6 +121,17 @@ sed 's|^\(\s*\)media:.*|\1media: sound:custom/THIS-FILE-DOES-NOT-EXIST|' \
 
 ( cd "$HERE" && ITEST_CONFIG_DIR="$ROOT/config" ITEST_BAD_CONFIG_DIR="$BADCFG" \
     ITEST_CONTROLLER_IMAGE="$CONTROLLER_IMAGE" python3 announce.py ) || rc=$?
+
+# ---------------------------------------------------------------------------
+# Phase 3: carrier failover.
+#
+# Runs with no controller, so it also exercises the Stasis-unavailable fallback
+# again. The carriers are recreated in different states by failover.py itself.
+# ---------------------------------------------------------------------------
+echo
+echo "--- phase 3: carrier failover ---"
+docker rm -f itest-ctl >/dev/null 2>&1 || true
+( cd "$HERE" && python3 failover.py ) || rc=$?
 
 if [ $rc -ne 0 ]; then
     echo; echo "--- asterisk log (last 30) ---"

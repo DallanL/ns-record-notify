@@ -12,6 +12,38 @@ set -euo pipefail
 : "${ARI_USER:?ARI_USER must be set}"
 : "${ARI_PASS:?ARI_PASS must be set}"
 
+# ---------------------------------------------------------------------------
+# Refuse to start with secrets that are public knowledge or trivially guessed.
+#
+# .env.example ships ARI_PASS=change-me-please; a deployment that copies the
+# example and forgets one line would otherwise come up looking healthy with a
+# call-control password published in the repository. A warning is not enough --
+# nobody reads container logs on a box that works. Failing closed makes the
+# mistake impossible to miss, and the message says how to fix it.
+#
+# ALLOW_INSECURE_DEFAULTS=1 downgrades these to warnings, for the integration
+# tests and for a lab on a private link. It is deliberately verbose to type.
+# ---------------------------------------------------------------------------
+weak_secret() {  # $1 = name, $2 = value, $3 = minimum length
+    local name="$1" value="$2" min="$3" why=""
+    case "${value,,}" in
+        change-me*|changeme*|password*|admin*|secret*|asterisk*|123456*) why="is a well-known placeholder" ;;
+    esac
+    [ -z "$why" ] && [ "${#value}" -lt "$min" ] && why="is shorter than ${min} characters"
+    [ -z "$why" ] && return 0
+    if [ "${ALLOW_INSECURE_DEFAULTS:-}" = "1" ]; then
+        echo "entrypoint: WARNING - ${name} ${why} (allowed by ALLOW_INSECURE_DEFAULTS=1)"
+        return 0
+    fi
+    {
+        echo "entrypoint: FATAL - ${name} ${why}."
+        echo "entrypoint: Generate one with:  openssl rand -base64 24 | tr -d '/+='"
+        echo "entrypoint: or run ./scripts/init-env.sh, which fills in every secret for you."
+    } >&2
+    exit 1
+}
+weak_secret ARI_PASS "$ARI_PASS" 16
+
 # These MUST be exported: envsubst reads the process environment, so a plain
 # shell assignment would substitute an empty string and silently produce, for
 # example, `bindport = ` in http.conf.
@@ -32,10 +64,13 @@ CARRIER_USER="${CARRIER_USER:-}"
 CARRIER_PASS="${CARRIER_PASS:-}"
 NS_AUTH_USER="${NS_AUTH_USER:-}"
 NS_AUTH_PASS="${NS_AUTH_PASS:-}"
+CARRIER_RESPONSE_TIMEOUT_MS="${CARRIER_RESPONSE_TIMEOUT_MS:-16000}"
+CARRIER_QUALIFY_SECONDS="${CARRIER_QUALIFY_SECONDS:-10}"
+CARRIER_FAILOVER_ON="${CARRIER_FAILOVER_ON:-CONGESTION,CHANUNAVAIL}"
 MAX_CONCURRENT_CALLS="${MAX_CONCURRENT_CALLS:-0}"
 MAX_CONCURRENT_PER_CALLER="${MAX_CONCURRENT_PER_CALLER:-0}"
 
-ENVSUBST_VARS='${EXTERNAL_IP} ${LOCAL_NET} ${NS_SIP_HOST} ${NS_SIP_PORT} ${CARRIER_SIP_HOST} ${CARRIER_SIP_PORT} ${ARI_USER} ${ARI_PASS} ${ARI_PORT} ${NS_TRANSPORT} ${CARRIER_TRANSPORT}'
+ENVSUBST_VARS='${EXTERNAL_IP} ${LOCAL_NET} ${NS_SIP_HOST} ${NS_SIP_PORT} ${CARRIER_SIP_HOST} ${CARRIER_SIP_PORT} ${ARI_USER} ${ARI_PASS} ${ARI_PORT} ${NS_TRANSPORT} ${CARRIER_TRANSPORT} ${CARRIER_SIP_T1_MS} ${CARRIER_SIP_TIMER_B_MS}'
 
 render() {
     # Substitute ONLY the named variables, never anything else in the file.
@@ -109,6 +144,8 @@ write_globals() {
 ; on restart. Set MAX_CONCURRENT_CALLS / MAX_CONCURRENT_PER_CALLER in .env.
 MAX_CONCURRENT_CALLS = ${MAX_CONCURRENT_CALLS}
 MAX_CONCURRENT_PER_CALLER = ${MAX_CONCURRENT_PER_CALLER}
+CARRIER_COUNT = ${#CARRIER_HOSTS[@]}
+CARRIER_FAILOVER_ON = ${CARRIER_FAILOVER_LIST}
 GLOBALS
     if [ "$MAX_CONCURRENT_CALLS" = "0" ] && [ "$MAX_CONCURRENT_PER_CALLER" = "0" ]; then
         echo "entrypoint: WARNING - no concurrency cap set. A compromised or spoofed"
@@ -117,6 +154,65 @@ GLOBALS
         echo "entrypoint: concurrency caps -- total ${MAX_CONCURRENT_CALLS}, per caller ${MAX_CONCURRENT_PER_CALLER} (0 = unlimited)"
     fi
 }
+
+# CARRIER_SIP_HOST is a comma-separated list. Each entry is one of:
+#   203.0.113.10          a gateway, on CARRIER_SIP_PORT
+#   203.0.113.11:5080     a gateway on its own port
+#   203.0.113.0/24        a CIDR -- matched on inbound traffic only, since a
+#                         range cannot be dialled
+# Every gateway is both a dial target (tried in the order listed) and an
+# inbound match; CIDRs are match-only.
+CARRIER_HOSTS=(); CARRIER_PORTS=(); CARRIER_CIDRS=()
+parse_carriers() {
+    local entry host port
+    local IFS=','
+    for entry in $CARRIER_SIP_HOST; do
+        entry="$(echo "$entry" | tr -d '[:space:]')"
+        [ -z "$entry" ] && continue
+        if [[ "$entry" == */* ]]; then
+            CARRIER_CIDRS+=("$entry")
+            continue
+        fi
+        host="${entry%%:*}"
+        port="$CARRIER_SIP_PORT"
+        [[ "$entry" == *:* ]] && port="${entry#*:}"
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            echo "entrypoint: FATAL - bad port in CARRIER_SIP_HOST entry '${entry}'" >&2
+            exit 1
+        fi
+        CARRIER_HOSTS+=("$host"); CARRIER_PORTS+=("$port")
+    done
+    if [ "${#CARRIER_HOSTS[@]}" -eq 0 ]; then
+        echo "entrypoint: FATAL - CARRIER_SIP_HOST has no dialable gateway (CIDRs cannot be dialled)" >&2
+        exit 1
+    fi
+}
+parse_carriers
+
+if ! [[ "$CARRIER_QUALIFY_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "entrypoint: FATAL - CARRIER_QUALIFY_SECONDS must be a non-negative integer" >&2; exit 1
+fi
+# Asterisk will not accept Timer B below 64 x Timer T1 ("Timer B setting is too
+# low. Setting to 32000") -- so the only way to shorten how long an unresponsive
+# gateway is waited on is to lower T1 and let B follow. T1 is also the first
+# retransmit interval, so it should stay comfortably above the round-trip time to
+# the carrier: 100ms is the floor here, and the 16s default gives T1=250ms.
+if ! [[ "$CARRIER_RESPONSE_TIMEOUT_MS" =~ ^[0-9]+$ ]] \
+        || [ "$CARRIER_RESPONSE_TIMEOUT_MS" -lt 6400 ] || [ "$CARRIER_RESPONSE_TIMEOUT_MS" -gt 32000 ]; then
+    echo "entrypoint: FATAL - CARRIER_RESPONSE_TIMEOUT_MS must be an integer from 6400 to 32000" >&2; exit 1
+fi
+export CARRIER_SIP_T1_MS=$(( (CARRIER_RESPONSE_TIMEOUT_MS + 63) / 64 ))
+export CARRIER_SIP_TIMER_B_MS=$(( CARRIER_SIP_T1_MS * 64 ))
+# Only statuses that mean "this gateway failed" may trigger a retry. BUSY is
+# allowed but is normally the CALLEE being busy, so retrying it just places the
+# same call again; ANSWER and CANCEL must never be retried.
+CARRIER_FAILOVER_LIST="${CARRIER_FAILOVER_ON//,/-}"
+for st in ${CARRIER_FAILOVER_ON//,/ }; do
+    case "$st" in
+        BUSY|CONGESTION|CHANUNAVAIL|NOANSWER) ;;
+        *) echo "entrypoint: FATAL - CARRIER_FAILOVER_ON: '${st}' is not one of BUSY, CONGESTION, CHANUNAVAIL, NOANSWER" >&2; exit 1 ;;
+    esac
+done
 
 write_globals
 emit_transports
@@ -148,7 +244,50 @@ IDENT
 }
 
 emit_identifies netsapiens-identify netsapiens "$NS_SIP_HOST"
-emit_identifies carrier-identify carrier "$CARRIER_SIP_HOST"
+# One endpoint, one AOR and one identify per gateway. The AOR is qualified with
+# OPTIONS so a gateway that is down is skipped instantly instead of being dialled
+# and waited on; CARRIER_QUALIFY_SECONDS=0 turns that off for carriers that do
+# not answer OPTIONS (they would otherwise be marked unavailable forever and
+# never used).
+emit_carriers() {
+    local i idx n=${#CARRIER_HOSTS[@]} j=0 cidr
+    for ((i = 0; i < n; i++)); do
+        idx=$((i + 1))
+        cat >> /etc/asterisk/pjsip.conf <<CARRIER
+
+[carrier-${idx}](carrier-base)
+aors = carrier-aor-${idx}
+from_domain = ${CARRIER_HOSTS[i]}
+
+[carrier-aor-${idx}]
+type = aor
+contact = sip:${CARRIER_HOSTS[i]}:${CARRIER_PORTS[i]}
+qualify_frequency = ${CARRIER_QUALIFY_SECONDS}
+qualify_timeout = 3.0
+
+[carrier-identify-${idx}]
+type = identify
+endpoint = carrier-${idx}
+match = ${CARRIER_HOSTS[i]}
+CARRIER
+    done
+    for cidr in "${CARRIER_CIDRS[@]}"; do
+        j=$((j + 1))
+        cat >> /etc/asterisk/pjsip.conf <<CIDR
+
+[carrier-identify-cidr-${j}]
+type = identify
+endpoint = carrier-1
+match = ${cidr}
+CIDR
+    done
+    echo "entrypoint: carrier gateways (tried in this order): $(
+        for ((i = 0; i < n; i++)); do printf '%s:%s ' "${CARRIER_HOSTS[i]}" "${CARRIER_PORTS[i]}"; done)"
+    [ "${#CARRIER_CIDRS[@]}" -gt 0 ] && echo "entrypoint: also matching inbound from: ${CARRIER_CIDRS[*]}"
+    echo "entrypoint: failover on ${CARRIER_FAILOVER_ON}; response timeout ${CARRIER_SIP_TIMER_B_MS}ms (T1 ${CARRIER_SIP_T1_MS}ms); qualify every ${CARRIER_QUALIFY_SECONDS}s (0 = off)"
+    return 0
+}
+emit_carriers
 
 # Require NetSapiens to prove itself with digest auth, in ADDITION to the IP
 # identify above -- not instead of it. The identify still decides which endpoint
@@ -166,6 +305,7 @@ emit_identifies carrier-identify carrier "$CARRIER_SIP_HOST"
 # inbound call -- but a trunk set to register will retry forever against a box
 # that has no AOR to bind to.
 if [[ -n "$NS_AUTH_USER" && -n "$NS_AUTH_PASS" ]]; then
+    weak_secret NS_AUTH_PASS "$NS_AUTH_PASS" 12
     cat >> /etc/asterisk/pjsip.conf <<PJSIP
 
 [netsapiens-auth]
@@ -185,8 +325,22 @@ PJSIP
     sed -i 's/^;aors = netsapiens-aor$/aors = netsapiens-aor/' /etc/asterisk/pjsip.conf
     echo "entrypoint: NetSapiens digest auth REQUIRED for user ${NS_AUTH_USER}"
 else
-    echo "entrypoint: WARNING - no NS_AUTH_USER/NS_AUTH_PASS set. NetSapiens is trusted"
-    echo "entrypoint: on source IP alone, which a spoofed packet can forge."
+    # Without this, NetSapiens is trusted on source IP alone -- a field the sender
+    # controls. On a public address that lets anyone able to forge a packet from a
+    # NetSapiens IP place calls on the carrier trunk, so it is refused by default.
+    if [ "${ALLOW_INSECURE_DEFAULTS:-}" = "1" ]; then
+        echo "entrypoint: WARNING - no NS_AUTH_USER/NS_AUTH_PASS set. NetSapiens is trusted"
+        echo "entrypoint: on source IP alone, which a spoofed packet can forge."
+    else
+        {
+            echo "entrypoint: FATAL - NS_AUTH_USER and NS_AUTH_PASS are not set."
+            echo "entrypoint: The NetSapiens trunk would be trusted on source IP alone, which a"
+            echo "entrypoint: spoofed packet can forge -- toll fraud needs nothing more. Set both"
+            echo "entrypoint: (and enter the same pair on the NetSapiens trunk), or set"
+            echo "entrypoint: ALLOW_INSECURE_DEFAULTS=1 if this really is a private link."
+        } >&2
+        exit 1
+    fi
 fi
 
 # Carrier trunks are commonly IP-authenticated. Only wire up digest auth and a registration
@@ -200,14 +354,21 @@ auth_type = userpass
 username = ${CARRIER_USER}
 password = ${CARRIER_PASS}
 
-[carrier-reg]
+PJSIP
+    # One registration per gateway: a carrier that requires REGISTER for outbound
+    # service needs it on every gateway we might fail over to, not just the first.
+    for ((i = 0; i < ${#CARRIER_HOSTS[@]}; i++)); do
+        cat >> /etc/asterisk/pjsip.conf <<REG
+
+[carrier-reg-$((i + 1))]
 type = registration
 transport = ${CARRIER_TRANSPORT}
 outbound_auth = carrier-auth
-server_uri = sip:${CARRIER_SIP_HOST}:${CARRIER_SIP_PORT}
-client_uri = sip:${CARRIER_USER}@${CARRIER_SIP_HOST}
+server_uri = sip:${CARRIER_HOSTS[i]}:${CARRIER_PORTS[i]}
+client_uri = sip:${CARRIER_USER}@${CARRIER_HOSTS[i]}
 retry_interval = 60
-PJSIP
+REG
+    done
     # Attach the auth to the outbound endpoint declared in the template.
     sed -i 's/^;outbound_auth = carrier-auth$/outbound_auth = carrier-auth/' /etc/asterisk/pjsip.conf
     echo "entrypoint: carrier digest auth enabled for user ${CARRIER_USER}"

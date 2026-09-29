@@ -5,8 +5,10 @@ including unauthenticated and malformed requests that a well-behaved stack
 would refuse to build.
 """
 import hashlib
+import math
 import re
 import socket
+import threading
 import time
 import uuid
 
@@ -41,7 +43,7 @@ class Caller:
         self._dialogs.append(d)
         return d
 
-    def invite(self, dest, auth=None, extra_headers=(), dialog=None):
+    def invite(self, dest, auth=None, extra_headers=(), dialog=None, timeout=3, stop_on_ringing=False):
         """Send one INVITE. Returns status, the raw messages, and the dialog so a
         follow-up INVITE can reuse the same Call-ID (needed for digest retries)."""
         d = dialog or self._new_dialog()
@@ -71,7 +73,9 @@ class Caller:
         lines += ['Content-Type: application/sdp', f'Content-Length: {len(body)}', '', body]
         s.sendto('\r\n'.join(lines).encode(), self.target)
 
-        raw, status_lines, deadline = [], [], time.time() + 3
+        s.settimeout(timeout)
+        began = time.time()
+        raw, status_lines, deadline = [], [], began + timeout
         while time.time() < deadline:
             try:
                 msg = s.recv(4096).decode(errors='replace')
@@ -93,22 +97,28 @@ class Caller:
                 # progress and more may follow.
                 if not _is_provisional(first):
                     break
+                # 180/183 mean the call is being offered somewhere, which is all a
+                # failover test needs to know -- and waiting out the full timeout
+                # on a call that rings forever would swamp the timing it measures.
+                if stop_on_ringing and (first.startswith('SIP/2.0 180') or first.startswith('SIP/2.0 183')):
+                    break
         final = [x for x in status_lines if not _is_provisional(x)]
         return {
             'status': final[-1] if final else (status_lines[-1] if status_lines else 'NO RESPONSE'),
             'raw': raw,
             'dialog': d,
             'uri': uri,
+            'elapsed': time.time() - began,
         }
 
-    def authenticated_invite(self, dest, user, password, extra_headers=()):
+    def authenticated_invite(self, dest, user, password, extra_headers=(), **kw):
         """INVITE, absorb the 401, answer the challenge on the same dialog."""
         first = self.invite(dest, extra_headers=extra_headers)
         challenge = challenge_of(first['raw'])
         if not challenge:
             return first
         auth = digest_for(challenge, user, password, first['uri'])
-        return self.invite(dest, auth=auth, extra_headers=extra_headers, dialog=first['dialog'])
+        return self.invite(dest, auth=auth, extra_headers=extra_headers, dialog=first['dialog'], **kw)
 
     def _ack(self, d):
         s = d['sock']
@@ -210,3 +220,107 @@ def _contact_uri(msg):
         return ''
     found = re.search(r'<([^>]+)>', line.group(1))
     return found.group(1) if found else line.group(1).strip()
+
+
+def _ulaw_to_lin(u):
+    u = ~u & 0xFF
+    v = (((u & 0x0F) << 3) + 0x84) << ((u >> 4) & 7)
+    v -= 0x84
+    return (-v if u & 0x80 else v) / 32768.0
+
+
+_ULAW = [_ulaw_to_lin(i) for i in range(256)]
+
+
+def _lin_to_ulaw(sample):
+    """16-bit signed linear -> mu-law byte (standard G.711 encoding)."""
+    sign = 0x80 if sample < 0 else 0
+    sample = min(abs(sample), 32635) + 0x84
+    exp, mask = 7, 0x4000
+    while exp > 0 and not (sample & mask):
+        exp, mask = exp - 1, mask >> 1
+    mant = (sample >> (exp + 3)) & 0x0F
+    return ~(sign | (exp << 4) | mant) & 0xFF
+
+
+def tone_payload(freq=1000, amplitude=0.3):
+    """160 samples (20 ms) of a sine tone. 1 kHz has a period of exactly 8
+    samples at 8 kHz, so consecutive packets are identical and phase-continuous."""
+    return bytes(_lin_to_ulaw(int(amplitude * 32767 * math.sin(2 * math.pi * freq * n / 8000)))
+                 for n in range(160))
+
+
+def sdp_media_address(raw_messages):
+    """(host, port) of the audio stream in the first message carrying SDP."""
+    for m in raw_messages:
+        ip = re.search(r'^c=IN IP4 (\S+)', m, re.M)
+        port = re.search(r'^m=audio (\d+)', m, re.M)
+        if ip and port:
+            return ip.group(1), int(port.group(1))
+    return None
+
+
+class RtpEndpoint:
+    """One side of a call's media.
+
+    Sends PCMU SILENCE and records the loudest energy it receives. Sending
+    silence rather than nothing matters twice over: Asterisk latches the remote
+    address from the first packets it sees, so a silent peer would never be
+    heard back; and because the endpoint itself contributes nothing audible,
+    anything it receives that is not silence must be audio Asterisk injected.
+    """
+
+    def __init__(self, local_port, tone=False):
+        # tone=True stands in for a caller who is TALKING; the default is silence.
+        self.payload = tone_payload() if tone else b'\xff' * 160
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('0.0.0.0', local_port))
+        self.sock.settimeout(0.2)
+        self.samples = []            # (time, per-packet RMS)
+        self._stop = threading.Event()
+        self._threads = []
+
+    def start(self, remote, send_seconds=None):
+        """`send_seconds` stops transmitting after that long while still
+        receiving -- a stand-in for a phone doing silence suppression, which
+        stops sending RTP entirely while its user is quiet."""
+        began = time.time()
+
+        def send():
+            seq, ts = 0, 0
+            while not self._stop.is_set():
+                if send_seconds is not None and time.time() - began > send_seconds:
+                    time.sleep(0.02)
+                    continue
+                hdr = bytes([0x80, 0]) + (seq & 0xFFFF).to_bytes(2, 'big') \
+                    + (ts & 0xFFFFFFFF).to_bytes(4, 'big') + (0xBADA55).to_bytes(4, 'big')
+                self.sock.sendto(hdr + self.payload, remote)
+                seq, ts = seq + 1, ts + 160
+                time.sleep(0.02)
+
+        def recv():
+            while not self._stop.is_set():
+                try:
+                    pkt, _ = self.sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                if len(pkt) > 12:
+                    body = pkt[12:]
+                    rms = math.sqrt(sum(_ULAW[b] ** 2 for b in body) / len(body))
+                    self.samples.append((time.time(), rms))
+
+        for fn in (send, recv):
+            t = threading.Thread(target=fn, daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    def loudest_since(self, t0):
+        return max((r for t, r in self.samples if t >= t0), default=0.0)
+
+    def stop(self):
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=1)
+        self.sock.close()

@@ -71,6 +71,7 @@ def main():
         'P-Asserted-Identity: <sip:+15551110005@ns.example>',
         'Diversion: <sip:+15550009999@ns.example>;reason=unconditional',
     ))
+    fourth.hangup_all()   # a call left up here holds a concurrency slot for every later phase
     rows = [r for r in carrier_invites() if '15551110005' in r['uri']]
     got = rows[-1] if rows else {}
     check('Identity survives the B2BUA hop byte-identical', got.get('identity', ''), ident)
