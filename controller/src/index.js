@@ -3,11 +3,28 @@ import { Rules } from './rules.js';
 import { CallRegistry } from './calls.js';
 import { createServer, listen } from './web.js';
 import { log } from './log.js';
+import { authFromEnv, exposureError } from './auth.js';
 
 const ariBaseUrl = process.env.ARI_URL ?? `http://127.0.0.1:${process.env.ARI_PORT ?? 8088}`;
 const rulesPath = process.env.RULES_PATH ?? '/config/rules.yaml';
 const webPort = Number(process.env.WEB_PORT ?? 8080);
 const webHost = process.env.WEB_HOST ?? '127.0.0.1';
+
+// Decide who may reach the operator UI BEFORE anything is started, so a bad
+// setting fails immediately instead of leaving call control open.
+let webAuth;
+try {
+  webAuth = authFromEnv();
+} catch (err) {
+  log.error(err.message);
+  process.exit(1);
+}
+const exposure = exposureError(webHost, webAuth);
+if (exposure) {
+  log.error(exposure);
+  process.exit(1);
+}
+if (webAuth) log.info('operator UI requires authentication', { user: webAuth.user });
 
 const rules = new Rules(rulesPath);
 
@@ -24,7 +41,7 @@ ari.connect();
 
 let server;
 try {
-  server = await listen(createServer({ registry, rules }), webPort, webHost);
+  server = await listen(createServer({ registry, rules, auth: webAuth }), webPort, webHost);
 } catch {
   // listen() has already logged what is wrong and how to fix it; a stack trace
   // on top of that only obscures it.

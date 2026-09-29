@@ -15,8 +15,14 @@ announcement, and route everything else straight to the carrier as it goes today
   - [Media addressing](#media-addressing)
   - [Diagnosing no-audio](#diagnosing-no-audio)
   - [Multiple NetSapiens servers](#multiple-netsapiens-servers)
+  - [Carrier failover](#carrier-failover)
 - [SIP header passthrough](#sip-header-passthrough)
 - [Setup](#setup)
+- [Deploying on a new Ubuntu VM](#deploying-on-a-new-ubuntu-vm)
+  - [What is exposed, and what is trusted](#what-is-exposed-and-what-is-trusted)
+  - [The service refuses to start unsafe](#the-service-refuses-to-start-unsafe)
+  - [Step by step](#step-by-step)
+  - [Behind a cloud router or NAT](#behind-a-cloud-router-or-nat)
 - [Managing the prompt](#managing-the-prompt)
   - [Installing or replacing it](#installing-or-replacing-it)
   - [Do not hand-convert](#do-not-hand-convert)
@@ -81,9 +87,9 @@ cp .env.example .env
 | `EXTERNAL_IP` | This host's IP **as NetSapiens and your carrier see it**. Goes into SDP; wrong value = one-way audio. |
 | `LOCAL_NET` | Your local subnet, so Asterisk knows what is not external. |
 | `NS_SIP_HOST` | The NetSapiens core(s) that will send calls here — see *Multiple NetSapiens servers* below. |
-| `CARRIER_SIP_HOST` / `CARRIER_SIP_PORT` | Where calls go next. Also accepts a list. |
+| `CARRIER_SIP_HOST` / `CARRIER_SIP_PORT` | Where calls go next. A **comma-separated list** of the carrier's gateways, tried in order — see *Carrier failover* below. |
 | `CARRIER_USER` / `CARRIER_PASS` | Leave **blank** for an IP-authenticated trunk. If set, the entrypoint adds digest auth and an outbound registration. |
-| `ARI_PASS` | Change it. ARI binds to loopback, but still. |
+| `ARI_PASS`, `NS_AUTH_USER` / `NS_AUTH_PASS` | Required. The service **refuses to start** on a placeholder or short secret, or without NetSapiens digest auth. `./scripts/init-env.sh` generates them — see *Deploying on a new Ubuntu VM*. |
 
 Then, on the two systems either side:
 
@@ -189,6 +195,77 @@ Check what actually loaded with:
 docker exec ns-announce-asterisk asterisk -rx "pjsip show identifies"
 ```
 
+### Carrier failover
+
+If the carrier publishes failover gateways, list them all, in the order to try:
+
+```sh
+CARRIER_SIP_HOST=192.0.2.10,192.0.2.11,192.0.2.12:5080
+```
+
+Each entry can carry its own port (`ip:5080`), and a CIDR (`192.0.2.0/24`) is
+accepted for **matching inbound traffic only** — a range cannot be dialled, so it
+is never a failover target. Prefer literal IPs to hostnames: a hostname is
+resolved once, at startup.
+
+**Every call starts at the first gateway.** The next is tried only if the
+previous one *failed*, and "failed" is deliberately narrow:
+
+| Outcome | Meaning | What happens |
+| --- | --- | --- |
+| `CONGESTION` | The gateway answered `503` — busy or overloaded | **fail over** |
+| `CHANUNAVAIL` | Down, unreachable, or never answered | **fail over** |
+| `BUSY` | The **destination** is busy (`486`) | call ends — no retry |
+| `NOANSWER`, `CANCEL`, `ANSWER` | A real outcome | call ends |
+
+`BUSY` is left out on purpose. Retrying it on a second gateway would ring the same
+person again, so it would turn one busy signal into a second phone call. If your
+carrier reports its own overload as `486`, add it with
+`CARRIER_FAILOVER_ON=CONGESTION,CHANUNAVAIL,BUSY` and accept that trade.
+
+**Why sequential rather than one AOR with several contacts.** Dialling a PJSIP
+endpoint whose AOR has multiple contacts *forks* to all of them at once, so the
+destination would ring once per gateway. Each gateway is therefore its own
+endpoint (`carrier-1`, `carrier-2`, …) and the dialplan tries them in turn.
+
+**Noticing a dead gateway.** Two mechanisms, for two situations:
+
+- Each gateway is pinged with SIP `OPTIONS` every `CARRIER_QUALIFY_SECONDS`
+  (default 10). One that stops answering is marked unavailable and **skipped
+  instantly** — a call never waits on it.
+- In the gap between a gateway dying and the next ping, a call can reach it. It
+  is abandoned after `CARRIER_RESPONSE_TIMEOUT_MS` (default 16 s) instead of SIP's
+  32 s. Asterisk will not accept Timer B below 64 × T1, so this works by lowering
+  T1 (`timeout / 64`); keep T1 above the round-trip time to the carrier, or you
+  get needless retransmits. The floor is 6400 ms.
+
+**What an outage looks like in the logs.** A call that skips a gateway already
+marked unavailable makes Asterisk log, at `ERROR`:
+
+```
+Endpoint 'carrier-1': Could not create dialog to invalid URI 'carrier-aor-1'.  Is endpoint registered and reachable?
+```
+
+That is the skip working, not a misconfiguration — expect one per call per down
+gateway for as long as the outage lasts. The dialplan line just before the retry
+(`carrier-1 returned CHANUNAVAIL … FAILOVER to carrier-2`) is the one to read.
+
+Two things to check for your carrier:
+
+- **It must answer `OPTIONS`**, or qualification marks it unavailable *forever*
+  and it is never used. Check with `docker compose exec asterisk asterisk -rx
+  "pjsip show contacts"`; if a gateway shows `Unavail` while healthy, set
+  `CARRIER_QUALIFY_SECONDS=0` (failover then relies on the timeout alone).
+- **Digest-authenticated carriers** get a registration per gateway. That path is
+  not covered by the integration tests, which use an IP-authenticated fake
+  carrier; test it against yours.
+
+Emergency calls fail over like any other. The integration suite proves all of
+this against two fake gateways — a healthy call, a `503`, a busy destination, a
+gateway that has just died, one already marked down, all of them down, and
+recovery — and asserts what each gateway was *asked to dial*, since the caller's
+response alone cannot show whether a call went to the right place or to two.
+
 ## SIP header passthrough
 
 **Asterisk is a B2BUA and relays no headers by default.** This was measured, not
@@ -258,6 +335,130 @@ docker compose up -d --build
 ```
 
 The operator UI is on `http://127.0.0.1:8080` by default.
+
+## Deploying on a new Ubuntu VM
+
+This box relays outbound calls to your carrier, so a public address makes it a
+toll-fraud target within hours of going up. The design is built so that the safe
+configuration is the default, and the unsafe ones are refused rather than warned
+about.
+
+### What is exposed, and what is trusted
+
+| | Reachable from | Protected by |
+| --- | --- | --- |
+| SIP `5060/udp` | only the NetSapiens and carrier IPs in `.env` | firewall **and** IP match; NetSapiens must also answer a **digest challenge** |
+| RTP `10000-20000/udp` | anywhere (media comes from addresses signalling never names) | Asterisk `strictrtp` — drops anything but the learned source |
+| SSH | your admin address | key-only login, firewalled to `--ssh-from` |
+| ARI `8088`, AMI `5038`, operator UI `8090` | **loopback only** | never bound to a public interface |
+
+The digest challenge is what stops **source-IP spoofing**. An IP allowlist trusts a
+field the sender controls: anyone who can forge a packet from a NetSapiens address
+could place calls on your carrier trunk and never need to see a reply, because for
+toll fraud the payoff is the number dialled, not the audio. Our `401`, with its
+nonce, goes to the *real* NetSapiens address, which a blind spoofer never
+receives.
+
+### The service refuses to start unsafe
+
+Each of these is a hard startup failure with a message that says how to fix it,
+because nobody reads the logs of a box that appears to work:
+
+- `ARI_PASS` (or `NS_AUTH_PASS`) is a known placeholder such as `change-me…`, or too short
+- NetSapiens digest credentials are not set
+- `WEB_HOST` is not loopback and `WEB_USER` / `WEB_PASS` are not set, or the password is under 12 characters
+
+`ALLOW_INSECURE_DEFAULTS=1` downgrades the first two to warnings, for a lab on a
+private link. Do not set it on a public host — `preflight.sh` fails if you do.
+
+### Step by step
+
+**1. Lock down SSH first**, from a second session so you cannot lose your way in:
+put your public key in `~/.ssh/authorized_keys`, then
+
+```sh
+echo 'PasswordAuthentication no
+PermitRootLogin no' | sudo tee /etc/ssh/sshd_config.d/99-hardening.conf
+sudo sshd -t && sudo systemctl reload ssh      # confirm a NEW login works before closing the old one
+```
+
+**2. Base packages and automatic security updates:**
+
+```sh
+sudo apt update && sudo apt -y upgrade
+sudo apt -y install ufw sox git unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+```
+
+**3. Docker Engine** from Docker's own apt repository
+([instructions](https://docs.docker.com/engine/install/ubuntu/)). Adding yourself
+to the `docker` group is root-equivalent on that machine; on a dedicated VM that
+is normally acceptable, but know that it is what you are doing.
+
+**4. Configuration** — every secret generated, none taken from the repository:
+
+```sh
+git clone git@github.com:DallanL/ns-record-notify.git && cd ns-record-notify
+./scripts/init-env.sh --external-ip <this-VM-public-IP> \
+    --ns-hosts <ns1,ns2,…> --carrier-hosts <gw1,gw2,…> \
+    --max-calls <a little above your busiest hour> --max-per-caller 3
+./scripts/prompt.sh install path/to/your-recording.wav
+```
+
+It prints the NetSapiens username and password **once** — enter them on the
+NetSapiens trunk. It never overwrites an existing `.env`, because regenerating
+secrets on a live box locks NetSapiens out until its trunk is updated.
+
+**5. Firewall.** Look first, then apply. `--enable` turns on default-deny, and only
+after it has allowed the SSH port you are connected on:
+
+```sh
+./scripts/firewall.sh                                        # the plan; changes nothing
+sudo ./scripts/firewall.sh --apply --enable --ssh-from <your-admin-IP>
+```
+
+Keep your current session open and confirm a *new* SSH login works before you
+close it. Without `--ssh-from`, SSH stays open to the whole internet — the most
+attacked service there is. Re-run the script whenever a gateway IP changes; it
+only touches its own rules, and one that has been removed from `.env` loses its
+rule.
+
+**6. Start it and audit it:**
+
+```sh
+docker compose up -d --build
+sudo ./scripts/preflight.sh
+```
+
+`preflight.sh` checks the deployment rather than trusting the steps above: file
+permissions, secret strength, digest auth, concurrency caps, what is actually
+listening, the firewall's effective state, sshd's *effective* config, container
+privileges, and whether every carrier gateway is reachable. It exits non-zero on
+any FAIL. Treat a FAIL as a blocker, and a WARN as a question to answer.
+
+### Behind a cloud router or NAT
+
+Nothing in the design needs the VM to hold a public address itself, but the
+addresses have to tell the truth:
+
+- **`EXTERNAL_IP`** is the router's public address *as the carrier and NetSapiens
+  see it* — it goes into SDP, and a wrong value means one-way audio.
+  **`LOCAL_NET`** is the VM's private subnet, so Asterisk knows which peers are
+  outside it.
+- The router must forward **UDP 5060 and 10000–20000** to the VM (1:1 NAT is
+  simplest), keep UDP NAT timeouts above a minute so idle media is not dropped,
+  and have any **SIP ALG / "SIP helper" turned off** — it rewrites SIP and RTP
+  headers and breaks digest auth and media in ways that are miserable to trace.
+- **Do not open 5060 to the internet** in the cloud security group. Allow it only
+  from the NetSapiens and carrier IPs, and SSH only from yours. The host firewall
+  and the cloud firewall are separate layers, and you want both.
+- **Use one network path.** `external_media_address` is per transport, so a box
+  whose trunks leave by different routes (say NetSapiens through a WireGuard
+  tunnel and the carrier through the LAN uplink) advertises one address to both,
+  and at least one side is told to send media somewhere our packets do not come
+  from. The entrypoint refuses that combination unless each trunk has its own
+  bind address. A single interface with a single public address — which a fresh
+  VM naturally is — is the configuration this is designed for.
 
 ## Managing the prompt
 
@@ -414,9 +615,20 @@ Three things worth knowing:
   is not a limitation in practice — there is nothing to stop before the first
   announcement, and the hook stays for the rest of the call once created.
 
-The UI binds to `127.0.0.1` by default. To reach it from another machine, set
-`WEB_HOST=0.0.0.0` and put a reverse proxy with authentication in front of it;
-there is no auth on the API itself.
+The UI binds to `127.0.0.1` by default, and the safest way in is an SSH tunnel:
+
+```sh
+ssh -L 8090:127.0.0.1:8090 you@the-vm      # then browse http://127.0.0.1:8090
+```
+
+Set `WEB_USER` and `WEB_PASS` (12+ characters) and it requires HTTP Basic auth on
+everything, the UI included — only `/api/health` stays open, for the container
+healthcheck. `WEB_HOST=0.0.0.0` is **refused at startup** unless those are set,
+so exposing call control by editing one line is not possible. Cross-origin
+`POST`s are rejected too: browsers attach Basic credentials to cross-site
+requests automatically, so without that check any page you visited could submit a
+form that stops every announcement. Use TLS (a reverse proxy, or the tunnel)
+whenever it leaves loopback: Basic auth sends the password with every request.
 
 Finally, point the NetSapiens outbound dial rule at this host **for the calls you
 want announced**, and add a failover route straight to the carrier (see *Failure
@@ -496,6 +708,11 @@ The **Asterisk** container is a hard dependency for outbound calls while the tru
 points at it, so configure a failover route on the NetSapiens dial rule that goes
 straight to the carrier.
 
+If **every carrier gateway** fails, the calling PBX is sent a `503`, not a `404`:
+a 503 reads as "try another route", which is what lets NetSapiens fall through to
+that failover route, while a 404 would read as a permanent failure and be given up
+on. See *Carrier failover*.
+
 ## Verifying
 
 1. **Transparency first.** With `announcement.enabled: false`, route outbound
@@ -520,7 +737,8 @@ straight to the carrier.
 cd controller && npm install && npm test
 ```
 
-`test/unit.test.mjs` covers the announce decision, the emergency guard, and the
+`test/web.test.mjs` covers the operator UI's access control (authentication, cross-origin
+refusal, and the refusal to bind a public address without credentials). `test/unit.test.mjs` covers the announce decision, the emergency guard, and the
 announcer state machine. `test/e2e.test.mjs` boots the real controller against a fake ARI
 server and drives a call through classify → answer → announce → stop → hangup.
 
@@ -533,7 +751,7 @@ Neither test needs Asterisk.
 ```
 
 Builds the images, stands up an isolated Asterisk plus a fake carrier on their own
-Docker network, and drives raw SIP at it. Two phases, 20 checks:
+Docker network, and drives raw SIP at it. Three phases, 48 checks:
 
 **Phase 1 — signalling**, with no controller running, which also exercises the
 `STASISSTATUS=FAILED` fallback: every call here completes with Stasis
@@ -544,7 +762,17 @@ the identity headers survive the B2BUA hop.
 **Phase 2 — the announcement path**, with the controller attached and the carrier
 answering. Asserts that ARI connects, the snoop attaches, Asterisk opens the
 prompt, and it repeats on the interval — then flips `media` to a nonexistent file
-and asserts the failure *is* reported.
+and asserts the failure *is* reported. The announcement phase also runs **real RTP**
+on both legs — the caller sends a tone as its voice and the far side measures what
+arrives — so it asserts that the *originating and terminating* parties both hear
+the announcement, not merely that Asterisk opened the file. Direction controls
+(`whisper=in`, `whisper=out`) were used to prove that check can fail.
+
+**Phase 3 — carrier failover**, against two fake gateways: a healthy call, a `503`,
+a busy destination, a gateway that has just died, one already marked down, all of
+them down, and recovery. It insists on an empty box first and on the concurrency
+cap never having fired, because a cap rejection is *also* a fast `503` — an earlier
+version of these checks passed for that wrong reason.
 
 Two things about it are deliberate and worth preserving.
 

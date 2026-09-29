@@ -1,8 +1,23 @@
+# Docker keeps container logs forever by default. On a public address SIP scanners
+# generate a steady stream of "failed request" lines, and on a small VM that alone
+# can fill the disk. Bounded rotation costs nothing.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   asterisk:
     build: ./asterisk
     container_name: ns-announce-asterisk
     restart: unless-stopped
+    logging: *logging
+    # Ceilings, not reservations: a runaway process (or a flood of calls) hits
+    # these instead of taking the whole VM down with it. Generous on purpose --
+    # Asterisk is thread-heavy, and starving it of pids breaks calls.
+    mem_limit: 2g
+    pids_limit: 2048
     # Host networking is deliberate. SIP/RTP through Docker's bridge NAT and
     # userland proxy adds jitter and breaks SDP address rewriting, and a 10k-port
     # RTP range would have to be published. With host networking this performs
@@ -34,6 +49,14 @@ services:
     build: ./controller
     container_name: ns-announce-controller
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
+    pids_limit: 256
+    # The controller writes nothing at runtime, so its filesystem can be read-only:
+    # a compromised process cannot drop a payload where it would survive a restart.
+    read_only: true
+    tmpfs:
+      - /tmp
     depends_on:
       - asterisk
     # Also host networking, so it can reach ARI on 127.0.0.1. ARI is bound to

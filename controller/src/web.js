@@ -2,11 +2,16 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { log } from './log.js';
+import { basicAuth, sameOriginOnly, securityHeaders } from './auth.js';
 
 const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
-export function createServer({ registry, rules }) {
+export function createServer({ registry, rules, auth = null }) {
   const app = express();
+  app.disable('x-powered-by');          // no need to advertise the framework
+  app.use(securityHeaders);
+  if (auth) app.use(basicAuth(auth));   // before everything, including the static UI
+  app.use(sameOriginOnly);
   app.use(express.json());
   app.use(express.static(publicDir));
 

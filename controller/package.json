@@ -6,9 +6,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node test/unit.test.mjs && node test/e2e.test.mjs",
+    "test": "node test/unit.test.mjs && node test/web.test.mjs && node test/e2e.test.mjs",
     "test:unit": "node test/unit.test.mjs",
-    "test:e2e": "node test/e2e.test.mjs"
+    "test:e2e": "node test/e2e.test.mjs",
+    "test:web": "node test/web.test.mjs"
   },
   "engines": {
     "node": ">=20"
