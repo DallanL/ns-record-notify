@@ -23,10 +23,12 @@ SUBNET=172.29.0.0/16
 # Created lazily in phase 2: cleanup() also runs once mid-script to clear stale
 # containers, and would delete this directory before it is ever used.
 BADCFG=""
+SOUNDS=""
 cleanup() {
     docker rm -f itest-asterisk itest-carrier itest-carrier2 itest-ctl >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     [ -n "$BADCFG" ] && rm -rf "$BADCFG"
+    [ -n "$SOUNDS" ] && rm -rf "$SOUNDS"
     return 0
 }
 # ITEST_KEEP=1 leaves the containers up afterwards, for poking at a failure.
@@ -56,8 +58,19 @@ start_carrier() {  # name ip [extra docker args, e.g. -e ANSWER=1]
 start_carrier itest-carrier 172.29.0.3
 start_carrier itest-carrier2 172.29.0.4
 
+# The announcement under test is the prompt that ships in the repo, installed into a
+# throwaway directory and mounted over the image's sounds. Until now the suite used
+# whatever sat in the developer's own (gitignored) asterisk/sounds/ -- which does not
+# exist on a fresh clone, so phase 2 could not pass there, and which tested a private
+# recording rather than the one every deployment gets.
+command -v sox >/dev/null || { echo "error: sox is required to install the bundled prompt (apt install sox)" >&2; exit 1; }
+SOUNDS="$(mktemp -d)"
+SOUNDS_DIR="$SOUNDS" "$ROOT/scripts/prompt.sh" install --default >/dev/null
+chmod 755 "$SOUNDS"; chmod 644 "$SOUNDS"/*   # Asterisk runs as an unprivileged user
+
 docker run -d --name itest-asterisk --network "$NET" --ip 172.29.0.2 \
     -p 15060:5060/udp \
+    -v "$SOUNDS:/var/lib/asterisk/sounds/custom:ro" \
     --cap-drop ALL --security-opt no-new-privileges \
     -e EXTERNAL_IP=172.29.0.2 -e LOCAL_NET=172.29.0.0/16 \
     -e NS_SIP_HOST=172.29.0.1 -e CARRIER_SIP_HOST=172.29.0.3,172.29.0.4 \

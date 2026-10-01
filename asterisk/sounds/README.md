@@ -3,6 +3,7 @@
 **Use the script — do not hand-convert:**
 
 ```sh
+./scripts/prompt.sh install --default                       # the bundled "all calls are recorded" prompt
 ./scripts/prompt.sh install path/to/your-recording.wav   # convert + install
 ./scripts/prompt.sh check                                # validate what is installed
 ```

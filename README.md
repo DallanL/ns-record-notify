@@ -403,7 +403,7 @@ git clone git@github.com:DallanL/ns-record-notify.git && cd ns-record-notify
 ./scripts/init-env.sh --external-ip <this-VM-public-IP> \
     --ns-hosts <ns1,ns2,…> --carrier-hosts <gw1,gw2,…> \
     --max-calls <a little above your busiest hour> --max-per-caller 3
-./scripts/prompt.sh install path/to/your-recording.wav
+./scripts/prompt.sh install --default      # or: install path/to/your-recording.wav
 ```
 
 It prints the NetSapiens username and password **once** — enter them on the
@@ -464,6 +464,16 @@ addresses have to tell the truth:
 ## Managing the prompt
 
 ### Installing or replacing it
+
+A stock prompt ships with the repository — a short recording that says "All calls
+are recorded." — so a new deployment works immediately:
+
+```sh
+./scripts/prompt.sh install --default
+```
+
+Treat it as a starting point. What you must tell callers, and in what words,
+depends on where you and they are, so you will probably want your own:
 
 ```sh
 ./scripts/prompt.sh install path/to/your-recording.wav
@@ -759,6 +769,11 @@ Docker network, and drives raw SIP at it. Three phases, 48 checks:
 unavailable. Asserts that an unauthenticated trunk is challenged, a wrong
 password is refused, both concurrency caps fire, emergency calls bypass them, and
 the identity headers survive the B2BUA hop.
+
+The prompt it plays is the one that ships in `asterisk/default-prompt/`, installed into a
+throwaway directory — not whatever happens to be in your own gitignored `asterisk/sounds/`.
+That makes the suite pass on a fresh clone, and means the file everyone deploys is the file
+that was tested.
 
 **Phase 2 — the announcement path**, with the controller attached and the carrier
 answering. Asserts that ARI connects, the snoop attaches, Asterisk opens the

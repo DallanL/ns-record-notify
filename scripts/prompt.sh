@@ -12,12 +12,16 @@
 #      though every log line says it played.
 #
 #   ./scripts/prompt.sh install <your-recording>   convert, normalise, install
+#   ./scripts/prompt.sh install --default         install the bundled "all calls are recorded" prompt
 #   ./scripts/prompt.sh check                      validate what is installed
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIR="$ROOT/asterisk/sounds"
+# SOUNDS_DIR points the script somewhere else -- used by the integration tests so
+# they never touch the prompt that is actually installed.
 BASE=recording-notice
+DIR="${SOUNDS_DIR:-$ROOT/asterisk/sounds}"
+DEFAULT_SRC="$ROOT/asterisk/default-prompt/$BASE.wav"
 CONTAINER="${CONTAINER:-ns-announce-asterisk}"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -60,32 +64,39 @@ check_prompt() {
         fi
     fi
 
-    # Measure the SPEECH, not the file: trailing silence drags whole-file RMS
-    # down and makes a perfectly good prompt look too quiet.
-    local peak rms stats
-    stats=$(sox "$DIR/$BASE.wav" -n silence 1 0.1 0.5% -1 0.1 0.5% stat 2>&1)
-    peak=$(echo "$stats" | awk '/Maximum amplitude/ {print $3}')
-    rms=$(echo "$stats" | awk '/RMS *amplitude/ {print $3}')
-    # A prompt quiet enough that silence-stripping consumes the whole file
-    # reports 0 and nan. Fall back to the unstripped stats so the numbers shown
-    # are real -- the verdict is the same either way, but "-nan" reads like a
-    # broken script rather than a broken prompt.
-    if [ -z "$peak" ] || [ "$peak" = "0.000000" ] || [ "$rms" = "-nan" ]; then
-        stats=$(sox "$DIR/$BASE.wav" -n stat 2>&1)
+    # Nothing to measure if the file is not there -- and sox on a missing file exits
+    # non-zero, which under set -e would end the script here with no verdict at all.
+    if [ -f "$DIR/$BASE.wav" ]; then
+        # Measure the SPEECH, not the file: trailing silence drags whole-file RMS
+        # down and makes a perfectly good prompt look too quiet.
+        local peak rms stats
+        stats=$(sox "$DIR/$BASE.wav" -n silence 1 0.1 0.5% -1 0.1 0.5% stat 2>&1 || true)
         peak=$(echo "$stats" | awk '/Maximum amplitude/ {print $3}')
         rms=$(echo "$stats" | awk '/RMS *amplitude/ {print $3}')
+        # A prompt quiet enough that silence-stripping consumes the whole file
+        # reports 0 and nan. Fall back to the unstripped stats so the numbers shown
+        # are real -- the verdict is the same either way, but "-nan" reads like a
+        # broken script rather than a broken prompt.
+        if [ -z "$peak" ] || [ "$peak" = "0.000000" ] || [ "$rms" = "-nan" ]; then
+            stats=$(sox "$DIR/$BASE.wav" -n stat 2>&1 || true)
+            peak=$(echo "$stats" | awk '/Maximum amplitude/ {print $3}')
+            rms=$(echo "$stats" | awk '/RMS *amplitude/ {print $3}')
+        fi
+        echo "speech peak $peak (want 0.50-0.90), speech RMS $rms (want 0.05-0.20)"
+        awk -v p="$peak" -v r="$rms" 'BEGIN {
+            if (p < 0.4)  { print "TOO QUIET  peak is low -- callers may not hear this"; exit 1 }
+            if (p > 0.95) { print "TOO LOUD   peak is clipping"; exit 1 }
+            if (r < 0.03) { print "TOO QUIET  speech RMS is low"; exit 1 }
+            print "OK       level is in range"
+        }' || fail=1
     fi
-    echo "speech peak $peak (want 0.50-0.90), speech RMS $rms (want 0.05-0.20)"
-    awk -v p="$peak" -v r="$rms" 'BEGIN {
-        if (p < 0.4)  { print "TOO QUIET  peak is low -- callers may not hear this"; exit 1 }
-        if (p > 0.95) { print "TOO LOUD   peak is clipping"; exit 1 }
-        if (r < 0.03) { print "TOO QUIET  speech RMS is low"; exit 1 }
-        print "OK       level is in range"
-    }' || fail=1
 
     # The authority on whether Asterisk can read it is Asterisk.
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
+    if [ -n "${SOUNDS_DIR:-}" ]; then
+        echo "note     SOUNDS_DIR is set, so $DIR is not what the container mounts; skipped the Asterisk-side check"
+    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
         for f in "$BASE.wav" "$BASE.ulaw"; do
+            [ -f "$DIR/$f" ] || continue
             if docker exec "$CONTAINER" asterisk -rx \
                 "file convert /var/lib/asterisk/sounds/custom/$f /tmp/promptcheck.slin" 2>&1 \
                 | grep -q "^Converted"; then
@@ -103,7 +114,19 @@ check_prompt() {
 }
 
 case "${1:-check}" in
-    install) shift; [ $# -eq 1 ] || die "usage: $0 install <recording>"; install_prompt "$1" ;;
+    install)
+        shift
+        if [ "${1:-}" = "--default" ] && [ $# -eq 1 ]; then
+            [ -f "$DEFAULT_SRC" ] || die "the bundled prompt is missing: $DEFAULT_SRC"
+            install_prompt "$DEFAULT_SRC"
+            echo
+            echo "This is the stock \"all calls are recorded\" prompt. The wording that is right for"
+            echo "your callers and jurisdiction is your decision -- replace it with your own with:"
+            echo "    ./scripts/prompt.sh install <your-recording>"
+        else
+            [ $# -eq 1 ] || die "usage: $0 install <recording> | install --default"
+            install_prompt "$1"
+        fi ;;
     check)   check_prompt ;;
-    *)       die "usage: $0 [check | install <recording>]" ;;
+    *)       die "usage: $0 [check | install <recording> | install --default]" ;;
 esac

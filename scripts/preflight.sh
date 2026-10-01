@@ -82,6 +82,24 @@ else
     esac
 fi
 
+# ------------------------------------------------------------------ prompt
+# Without a prompt, calls connect and sound completely normal -- the controller only
+# logs "playback FAILED" after the first call, and nobody is told they are recorded.
+# Delegates to prompt.sh, which also asks Asterisk whether it can open the files.
+section "Announcement prompt"
+if ! command -v sox >/dev/null; then
+    warn "sox is not installed, so the prompt could not be checked" "apt install sox"
+else
+    prompt_out="$("$ROOT/scripts/prompt.sh" check 2>&1)"; prompt_rc=$?
+    if [ "$prompt_rc" -eq 0 ]; then
+        pass "a valid announcement prompt is installed (format, level, readable by Asterisk)"
+    else
+        reason="$(grep -E 'MISSING|BROKEN|TOO (QUIET|LOUD)' <<<"$prompt_out" | head -1 | sed 's/  */ /g')"
+        fail "the announcement prompt is not usable: ${reason:-see ./scripts/prompt.sh check}" \
+             "./scripts/prompt.sh install --default   (or: install <your-recording>)"
+    fi
+fi
+
 # ------------------------------------------------------------------ what is listening
 section "Network exposure"
 if command -v ss >/dev/null; then
