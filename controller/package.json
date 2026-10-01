@@ -2,6 +2,7 @@
   "name": "ns-record-notify-controller",
   "version": "1.0.0",
   "description": "Injects a recurring announcement into outbound NetSapiens calls via Asterisk ARI",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.js",
   "scripts": {

@@ -37,6 +37,7 @@ announcement, and route everything else straight to the carrier as it goes today
 - [Tests](#tests)
   - [Integration suite (needs Docker)](#integration-suite-needs-docker)
 - [Known Asterisk behaviour worth knowing](#known-asterisk-behaviour-worth-knowing)
+- [License](#license)
 
 ## Why it works this way
 
@@ -134,7 +135,7 @@ setting in PJSIP. Either route both trunks down the same interface (simplest), o
 give each its own transport:
 
 ```sh
-NS_BIND_IP=10.0.0.2          # tunnel interface
+NS_BIND_IP=10.0.0.2        # tunnel interface
 NS_EXTERNAL_IP=10.0.0.2
 CARRIER_BIND_IP=10.0.0.3    # WAN interface
 CARRIER_EXTERNAL_IP=203.0.113.10
@@ -796,3 +797,11 @@ not, so "no error appeared" is not evidence on its own.
 channel while the spied channel is still up — Asterisk reaps it with the call.
 Creating a snoop per start/stop cycle therefore leaks idle `Snoop/` channels on a
 long call, so `Announcer` creates at most one per call and reuses it.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+That covers the code in this repository. The container images it builds download
+and compile Asterisk (GPLv2, with its own exceptions) and install other
+open-source packages, which keep their own licenses; none of that is included here.
