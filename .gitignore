@@ -1,5 +1,16 @@
 node_modules/
+
+# EVERY .env variant holds secrets; only the template is meant to be public. This
+# used to ignore just ".env", which left the ".env.bak.<timestamp>" copy that
+# scripts/init-env.sh --force makes (full of the OLD secrets), and .env.local /
+# .env.production, one `git add -A` away from being committed.
 .env
+.env.*
+!.env.example
+
+# Packet captures contain call media and real addresses.
+*.pcap
+*.pcapng
 # The prompt is site-specific audio, not source. Keep your real recording out of
 # the repo (or force-add it deliberately with `git add -f`).
 asterisk/sounds/*.wav
